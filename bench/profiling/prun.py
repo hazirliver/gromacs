@@ -143,6 +143,12 @@ def main(argv=None):
             if v.get("pre"):
                 subprocess.run(v["pre"], shell=True, check=True)
             snap0 = snapshot()
+            if not bld.gmx.exists():
+                recf.write(json.dumps({"variant": name, "repeat": rep, "status": "error",
+                                       "message": f"missing {bld.gmx}"}) + "\n")
+                recf.flush()
+                print(f"    -> error: missing {bld.gmx}", file=sys.stderr, flush=True)
+                continue
             try:
                 r = mdrun(bld, tpr, rundir, args, env=v["env"], nsteps=nsteps, resetstep=resetstep,
                           timeout=float(v.get("timeout", 1800)), telemetry=None if a.no_telemetry else True)

@@ -7,11 +7,11 @@ S = "~/.cache/gmxbench/builds/780edef73168a96d"   # cuda: cycle sub-counters + N
 
 [tprs]
 prod = "bench/results/profiling-2026-10-06/raw/inputs/prod/topol.tpr"
-rc1.20 = "bench/results/profiling-2026-10-06/raw/inputs/pme-rc1.20/topol.tpr"
-rc1.25 = "bench/results/profiling-2026-10-06/raw/inputs/pme-rc1.25/topol.tpr"
-rc1.30 = "bench/results/profiling-2026-10-06/raw/inputs/pme-rc1.30/topol.tpr"
-rc1.35 = "bench/results/profiling-2026-10-06/raw/inputs/pme-rc1.35/topol.tpr"
-rc1.40 = "bench/results/profiling-2026-10-06/raw/inputs/pme-rc1.40/topol.tpr"
+rc120 = "bench/results/profiling-2026-10-06/raw/inputs/pme-rc1.20/topol.tpr"
+rc125 = "bench/results/profiling-2026-10-06/raw/inputs/pme-rc1.25/topol.tpr"
+rc130 = "bench/results/profiling-2026-10-06/raw/inputs/pme-rc1.30/topol.tpr"
+rc135 = "bench/results/profiling-2026-10-06/raw/inputs/pme-rc1.35/topol.tpr"
+rc140 = "bench/results/profiling-2026-10-06/raw/inputs/pme-rc1.40/topol.tpr"
 
 [defaults]
 build = "P"
@@ -20,24 +20,24 @@ nsteps = 25000
 resetstep = 5000
 
 [[variant]]
-name = "rc1.20"
-tpr = "rc1.20"
+name = "rc120"
+tpr = "rc120"
 
 [[variant]]
-name = "rc1.25"
-tpr = "rc1.25"
+name = "rc125"
+tpr = "rc125"
 
 [[variant]]
-name = "rc1.30"
-tpr = "rc1.30"
+name = "rc130"
+tpr = "rc130"
 
 [[variant]]
-name = "rc1.35"
-tpr = "rc1.35"
+name = "rc135"
+tpr = "rc135"
 
 [[variant]]
-name = "rc1.40"
-tpr = "rc1.40"
+name = "rc140"
+tpr = "rc140"
 
 [[variant]]
 name = "tunepme"
