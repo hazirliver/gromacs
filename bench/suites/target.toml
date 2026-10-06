@@ -1,0 +1,104 @@
+# Target systems: the use cases this fork is being optimised for.
+#
+# Every case whose `system` is listed in [target].systems runs on EVERY gmxbench invocation: in all
+# tiers the case lists (smoke/quick/full) and regardless of --cases filters.
+#   --target-only   run only these cases (fast loop while optimising for the target)
+#   --no-target     leave them out
+#
+# Current target: the MAS1-Gi / 20-hydroxyecdysone membrane system from data/ (planned for
+# millisecond-scale MD). The input archive is NOT in git (customer data); point to it with
+# $GMXBENCH_MAS1_ARCHIVE if it is not at data/mas-20e-production-inputs.tar. If it is missing the
+# cases are skipped with a warning.
+#
+# To add or switch a target: add a [systems.<name>] block (recipe "archive" for a tarball with
+# conf/topology/mdp, or any other recipe from default.toml), list it in [target].systems, and add
+# quality/perf/sweep entries for it below. Personal, untracked variations go into suites/local.toml.
+
+[target]
+systems = ["mas1-20e"]
+
+[systems.mas1-20e]
+description = "MAS1 + Gi heterotrimer + 20-hydroxyecdysone in an asymmetric membrane (CHARMM36, CHARMM-GUI), 185,486 atoms"
+recipe = "archive"
+path = "data/mas-20e-production-inputs.tar"   # relative to the repository root
+path_env = "GMXBENCH_MAS1_ARCHIVE"           # overrides `path` when set
+gro = "npt2.gro"
+top = "topol.top"
+ndx = "index.ndx"
+mdp = "md.mdp"
+
+# The production command line recommended by `gmxbench sweep` on the L40S + Xeon 6338 node:
+#   gmx mdrun -ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200
+# (explicit -bonded gpu matters: mdrun's default keeps bondeds on the CPU, ~40% slower here).
+[configs.perf-mas1-production]
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+gpu = true
+cpus = 40
+
+# The same offload/pair-list setup at the thread count of the quality runs.
+[configs.mas1-production]
+args = "-ntmpi 1 -ntomp 4 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+gpu = true
+cpus = 4
+
+[[quality.cases]]
+name = "mas1/charmm36"
+system = "mas1-20e"
+mdp = ["common", "@system", "membrane"]
+nsteps = { smoke = 20, quick = 100, full = 500 }
+out_every = { smoke = 10, quick = 25, full = 50 }
+configs = ["cpu-1r4t", "cpu-dd4", "gpu-nbpme", "gpu-resident", "mas1-production"]
+tiers = ["smoke", "quick", "full"]
+
+# Longer deterministic run: catches changes that only show up after many steps (pair-list updates,
+# domain repartitioning, coupling steps) at bitwise level.
+[[quality.cases]]
+name = "mas1/charmm36-long"
+system = "mas1-20e"
+mdp = ["common", "@system", "membrane"]
+nsteps = { full = 1000 }
+out_every = 100
+configs = ["cpu-dd4", "mas1-production"]
+tiers = ["full"]
+
+# NOTE: 4 fs with hydrogen mass repartitioning currently blows up within ~10 steps because the
+# rings of PROA PHE147 and PROB TRP104 are interlocked in npt2.gro (ring penetration). Re-enable
+# (tiers = ["quick", "full"]) once the input is fixed.
+[[quality.cases]]
+name = "mas1/charmm36-hmr-4fs"
+system = "mas1-20e"
+mdp = ["common", "@system", "membrane", "hmr"]
+nsteps = { full = 500 }
+out_every = 25
+configs = ["cpu-1r4t", "gpu-resident"]
+tiers = []
+
+[[perf.cases]]
+name = "mas1/charmm36"
+system = "mas1-20e"
+mdp = ["common", "@system", "membrane", "perf-out"]
+configs = ["perf-mas1-production", "perf-gpu-resident", "perf-gpu-nbpme"]
+calib_steps = 1000
+tiers = ["smoke", "quick", "full"]
+
+[[perf.cases]]
+name = "mas1/charmm36-cpu"
+system = "mas1-20e"
+mdp = ["common", "@system", "membrane", "perf-out"]
+configs = ["perf-gpu-nb", "perf-cpu-dd"]
+calib_steps = 200
+tiers = ["full"]
+
+[[perf.cases]]
+name = "mas1/charmm36-hmr-4fs"
+system = "mas1-20e"
+mdp = ["common", "@system", "membrane", "hmr", "perf-out"]
+configs = ["perf-mas1-production"]
+calib_steps = 1000
+tiers = []                       # see the note on the quality case above
+
+[[sweep.systems]]
+name = "mas1-20e"
+system = "mas1-20e"
+mdp = ["common", "@system", "membrane", "perf-out"]
+tiers = ["smoke", "quick", "full"]

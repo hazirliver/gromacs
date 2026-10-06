@@ -1,0 +1,38 @@
+diff --git a/src/gromacs/mdlib/update.cpp b/src/gromacs/mdlib/update.cpp
+index b2789c203b..77f1307504 100644
+--- a/src/gromacs/mdlib/update.cpp
++++ b/src/gromacs/mdlib/update.cpp
+@@ -401,7 +401,7 @@ updateMDLeapfrogSimple(int                                 start,
+              * (then already slow) update by 20%. If all data remains in cache,
+              * using RVec is much faster.
+              */
+-            real vNew = lambdaGroup * v[a][d] + f[a][d] * invMassPerDim[a][d] * dt;
++            real vNew = lambdaGroup * v[a][d] + f[a][d] * (invMassPerDim[a][d] * dt);
+ 
+             if (parrinelloRahmanVelocityScaling == ParrinelloRahmanVelocityScaling::Diagonal)
+             {
+@@ -516,18 +516,18 @@ updateMDLeapfrogSimpleSimd(int                               start,
+ 
+         if constexpr (numTempScaleValues == NumTempScaleValues::None)
+         {
+-            v0 = gmx::fma(f0 * invMass0, timestep, v0);
+-            v1 = gmx::fma(f1 * invMass1, timestep, v1);
+-            v2 = gmx::fma(f2 * invMass2, timestep, v2);
++            v0 = gmx::fma(f0, invMass0 * timestep, v0);
++            v1 = gmx::fma(f1, invMass1 * timestep, v1);
++            v2 = gmx::fma(f2, invMass2 * timestep, v2);
+         }
+         else
+         {
+             static_assert(
+                     numTempScaleValues == NumTempScaleValues::Single,
+                     "Invalid multiple temperature-scaling values (ie. groups) for SIMD leapfrog");
+-            v0 = gmx::fma(f0 * invMass0, timestep, lambdaSystem * v0);
+-            v1 = gmx::fma(f1 * invMass1, timestep, lambdaSystem * v1);
+-            v2 = gmx::fma(f2 * invMass2, timestep, lambdaSystem * v2);
++            v0 = gmx::fma(f0, invMass0 * timestep, lambdaSystem * v0);
++            v1 = gmx::fma(f1, invMass1 * timestep, lambdaSystem * v1);
++            v2 = gmx::fma(f2, invMass2 * timestep, lambdaSystem * v2);
+         }
+         if constexpr (storeUpdatedVelocities == StoreUpdatedVelocities::Yes)
+         {

@@ -1,0 +1,6 @@
+.venv/
+.tools/
+results/
+__pycache__/
+*.pyc
+suites/local.toml

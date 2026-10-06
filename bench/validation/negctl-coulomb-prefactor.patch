@@ -1,0 +1,13 @@
+diff --git a/src/gromacs/mdtypes/interaction_const.cpp b/src/gromacs/mdtypes/interaction_const.cpp
+index 4e53d47622..0a98870218 100644
+--- a/src/gromacs/mdtypes/interaction_const.cpp
++++ b/src/gromacs/mdtypes/interaction_const.cpp
+@@ -266,7 +266,7 @@ interaction_const_t init_interaction_const(FILE*               fp,
+     /* Set the Coulomb energy conversion factor */
+     if (coulomb.epsilon_r != 0)
+     {
+-        coulomb.epsfac = gmx::c_one4PiEps0 / coulomb.epsilon_r;
++        coulomb.epsfac = gmx::c_one4PiEps0 / coulomb.epsilon_r * 1.0001; // negative control
+     }
+     else
+     {

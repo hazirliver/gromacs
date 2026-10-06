@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Launcher: runs the gmxbench package with the bench/.venv interpreter (run bench/setup.sh once).
+bench="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+if [ ! -x "$bench/.venv/bin/python" ]; then
+    echo "gmxbench: missing $bench/.venv - run $bench/setup.sh first" >&2
+    exit 2
+fi
+PYTHONPATH="$bench${PYTHONPATH:+:$PYTHONPATH}" exec "$bench/.venv/bin/python" -m gmxbench "$@"

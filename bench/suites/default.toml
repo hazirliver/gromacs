@@ -1,0 +1,618 @@
+# gmxbench default suite: generic coverage of algorithms, system sizes and run configurations.
+# Loaded first; then bench/suites/target.toml (the systems you optimise for), then the git-ignored
+# bench/suites/local.toml, then files from $GMXBENCH_SUITE (colon-separated), then --suite files.
+#
+# Structure
+#   [profiles.*]  CMake build profiles (both sides of an A/B comparison use the same profile)
+#   [systems.*]   test systems; generated reproducibly by a recipe (see gmxbench/systems.py)
+#   [mdp.*]       named mdp parameter sets; a case merges a list of them in order
+#   [configs.*]   mdrun run configurations (offload, ranks/threads, env)
+#   [quality]     bitwise/tolerance regression cases
+#   [perf]        end-to-end A/B performance cases (+ per-stage and GPU kernel timings)
+#   [micro]       isolated kernel micro-benchmarks
+#   [sweep]       per-system search over mdrun arguments
+#
+# Values written as {quick = a, full = b} depend on the selected tier (--tier).
+# Every case has `tiers`; it only runs when the selected tier is listed.
+
+# ----------------------------------------------------------------------------------------------
+# Build profiles
+# ----------------------------------------------------------------------------------------------
+[profiles.cuda]
+description = "Mixed precision, CUDA (arch auto-detected), auto SIMD, own FFTW, cycle sub-counters + NVTX ranges"
+cuda_arch = "auto"
+cmake = [
+  "-DCMAKE_BUILD_TYPE=Release",
+  "-DGMX_GPU=CUDA",
+  "-DGMX_BUILD_OWN_FFTW=ON",
+  "-DGMX_CYCLE_SUBCOUNTERS=ON",
+  "-DGMX_USE_NVTX=ON",
+  "-DGMXAPI=OFF",
+  "-DGMX_INSTALL_NBLIB_API=OFF",
+  "-DREGRESSIONTEST_DOWNLOAD=OFF",
+]
+
+[profiles.cuda-nosub]
+description = "Like 'cuda' but without cycle sub-counters/NVTX (closest to a production build)"
+cuda_arch = "auto"
+cmake = [
+  "-DCMAKE_BUILD_TYPE=Release",
+  "-DGMX_GPU=CUDA",
+  "-DGMX_BUILD_OWN_FFTW=ON",
+  "-DGMXAPI=OFF",
+  "-DGMX_INSTALL_NBLIB_API=OFF",
+  "-DREGRESSIONTEST_DOWNLOAD=OFF",
+]
+
+[profiles.cpu]
+description = "Mixed precision, CPU only, auto SIMD, own FFTW, cycle sub-counters"
+cmake = [
+  "-DCMAKE_BUILD_TYPE=Release",
+  "-DGMX_GPU=OFF",
+  "-DGMX_BUILD_OWN_FFTW=ON",
+  "-DGMX_CYCLE_SUBCOUNTERS=ON",
+  "-DGMXAPI=OFF",
+  "-DGMX_INSTALL_NBLIB_API=OFF",
+  "-DREGRESSIONTEST_DOWNLOAD=OFF",
+]
+
+[profiles.cpu-double]
+description = "Double precision, CPU only (reference numerics)"
+cmake = [
+  "-DCMAKE_BUILD_TYPE=Release",
+  "-DGMX_GPU=OFF",
+  "-DGMX_DOUBLE=ON",
+  "-DGMX_BUILD_OWN_FFTW=ON",
+  "-DGMXAPI=OFF",
+  "-DGMX_INSTALL_NBLIB_API=OFF",
+  "-DREGRESSIONTEST_DOWNLOAD=OFF",
+]
+
+# ----------------------------------------------------------------------------------------------
+# Systems (generic coverage; the systems you are optimising for go into target.toml)
+# ----------------------------------------------------------------------------------------------
+[systems.water-5k]
+description = "SPC/E water, 5,184 atoms (latency/launch-bound regime)"
+recipe = "water"
+model = "spce"
+nbox = 2
+
+[systems.water-41k]
+description = "SPC/E water, 41,472 atoms"
+recipe = "water"
+model = "spce"
+nbox = 4
+
+[systems.water-332k]
+description = "SPC/E water, 331,776 atoms (throughput-bound regime)"
+recipe = "water"
+model = "spce"
+nbox = 8
+
+[systems.water-1m]
+description = "SPC/E water, 1,119,744 atoms (large system)"
+recipe = "water"
+model = "spce"
+nbox = 12
+
+[systems.tip4p-35k]
+description = "TIP4P water, 27,648 atoms incl. virtual sites (vsite + SETTLE paths)"
+recipe = "water"
+model = "tip4p"
+nbox = 3
+
+[systems.water-fep-41k]
+description = "SPC/E water, 41,472 atoms; 300 molecules decoupled with soft-core (perturbed CPU kernels)"
+recipe = "water"
+model = "spce"
+nbox = 4
+fep_molecules = 300
+
+[systems.lysozyme]
+description = "Hen egg-white lysozyme (1AKI), AMBER99SB-ILDN + TIP3P, 0.15 M NaCl, dodecahedron, equilibrated"
+recipe = "pdb2gmx"
+pdb_url = "https://files.rcsb.org/download/1AKI.pdb"
+ff = "amber99sb-ildn"
+water = "tip3p"
+boxtype = "dodecahedron"
+distance = 1.0
+salt = 0.15
+nvt_ps = 20
+npt_ps = 20
+
+[systems.lysozyme-vsite]
+description = "Lysozyme with virtual-site hydrogens (enables 4 fs time step)"
+recipe = "pdb2gmx"
+pdb_url = "https://files.rcsb.org/download/1AKI.pdb"
+ff = "amber99sb-ildn"
+water = "tip3p"
+vsite = "hydrogens"
+boxtype = "dodecahedron"
+distance = 1.0
+salt = 0.15
+nvt_ps = 20
+npt_ps = 20
+
+# ----------------------------------------------------------------------------------------------
+# mdp parameter sets (merged in the order listed by a case; "@system" = the system's own mdp)
+# ----------------------------------------------------------------------------------------------
+[mdp.common]
+cutoff-scheme = "Verlet"
+ld-seed = 1993
+gen-seed = 1993
+
+[mdp.water-pme]
+integrator = "md"
+dt = 0.002
+coulombtype = "PME"
+rcoulomb = 1.0
+rvdw = 1.0
+fourierspacing = 0.125
+dispcorr = "EnerPres"
+tcoupl = "v-rescale"
+tc-grps = "System"
+tau-t = 0.5
+ref-t = 300
+pcoupl = "C-rescale"
+pcoupltype = "isotropic"
+tau-p = 2.0
+ref-p = 1.0
+compressibility = 4.5e-5
+constraints = "h-bonds"
+
+[mdp.water-rf]
+coulombtype = "Reaction-field"
+epsilon-rf = 0
+rcoulomb = 1.1
+rvdw = 1.1
+
+[mdp.water-ljpme]
+vdwtype = "PME"
+rvdw = 1.0
+rcoulomb = 1.0
+dispcorr = "no"
+
+[mdp.water-switch]
+vdw-modifier = "Potential-switch"
+rvdw-switch = 0.9
+
+[mdp.nve-vv]
+integrator = "md-vv"
+tcoupl = "no"
+pcoupl = "no"
+
+[mdp.sd]
+integrator = "sd"
+tcoupl = "no"
+pcoupl = "no"
+tau-t = 1.0
+
+[mdp.nh-pr]
+tcoupl = "nose-hoover"
+tau-t = 1.0
+pcoupl = "Parrinello-Rahman"
+tau-p = 5.0
+
+[mdp.fep]
+free-energy = "yes"
+couple-moltype = "SOLF"
+couple-lambda0 = "vdw-q"
+couple-lambda1 = "none"
+couple-intramol = "no"
+init-lambda-state = 3
+# charges are switched off before the Lennard-Jones interactions (state 3: Coulomb off, LJ 25% off)
+coul-lambdas = "0.0 0.5 1.0 1.0 1.0 1.0 1.0"
+vdw-lambdas = "0.0 0.0 0.0 0.25 0.5 0.75 1.0"
+sc-alpha = 0.5
+sc-power = 1
+sc-sigma = 0.3
+nstdhdl = 50
+separate-dhdl-file = "no"
+calc-lambda-neighbors = -1
+
+[mdp.protein]
+integrator = "md"
+dt = 0.002
+coulombtype = "PME"
+rcoulomb = 1.0
+rvdw = 1.0
+fourierspacing = 0.125
+dispcorr = "EnerPres"
+tcoupl = "v-rescale"
+tc-grps = "Protein Non-Protein"
+tau-t = "0.1 0.1"
+ref-t = "300 300"
+pcoupl = "C-rescale"
+pcoupltype = "isotropic"
+tau-p = 2.0
+ref-p = 1.0
+compressibility = 4.5e-5
+constraints = "h-bonds"
+continuation = "yes"
+gen-vel = "no"
+
+[mdp.all-bonds]
+constraints = "all-bonds"
+
+[mdp.dt4fs]
+dt = 0.004
+
+[mdp.hmr]
+dt = 0.004
+mass-repartition-factor = 3
+
+[mdp.membrane]
+# Use the equilibrated velocities from the archive instead of regenerating them.
+gen-vel = "no"
+continuation = "yes"
+
+# Output for quality runs is filled in per case (every `out_every` steps, full precision).
+# Output for performance runs: production-like, no trajectory inside the short timed window.
+[mdp.perf-out]
+nstxout = 0
+nstvout = 0
+nstfout = 0
+nstxout-compressed = 0
+nstlog = 0
+nstenergy = 1000
+nstcalcenergy = 100
+
+# ----------------------------------------------------------------------------------------------
+# mdrun configurations
+#   args   mdrun arguments (in addition to -s/-deffnm/-nsteps/... added by gmxbench)
+#   env    extra environment
+#   gpu    requires a GPU
+#   cpus   logical CPUs the run occupies (used to schedule concurrent quality jobs)
+# Quality configurations are run with -reprod; performance configurations pin threads.
+# ----------------------------------------------------------------------------------------------
+[configs.cpu-1r4t]
+args = "-ntmpi 1 -ntomp 4 -nb cpu -pme cpu -bonded cpu -update cpu"
+cpus = 4
+
+[configs.cpu-dd4]
+args = "-ntmpi 4 -ntomp 1 -npme 0 -dlb no -nb cpu -pme cpu -bonded cpu -update cpu"
+cpus = 4
+
+[configs.cpu-dd4-pme1]
+args = "-ntmpi 4 -ntomp 1 -npme 1 -dlb no -nb cpu -pme cpu -bonded cpu -update cpu"
+cpus = 4
+
+[configs.gpu-nb]
+args = "-ntmpi 1 -ntomp 4 -nb gpu -pme cpu -bonded cpu -update cpu"
+gpu = true
+cpus = 4
+
+[configs.gpu-nbpme]
+args = "-ntmpi 1 -ntomp 4 -nb gpu -pme gpu -bonded cpu -update cpu"
+gpu = true
+cpus = 4
+
+[configs.gpu-resident]
+args = "-ntmpi 1 -ntomp 4 -nb gpu -pme gpu -bonded gpu -update gpu"
+gpu = true
+cpus = 4
+
+# --- whole-node performance configurations ---
+[configs.perf-cpu]
+args = "-ntmpi 1 -ntomp 20 -nb cpu -pme cpu -bonded cpu -update cpu"
+cpus = 40
+
+[configs.perf-cpu-dd]
+args = "-ntmpi 5 -ntomp 4 -npme 0 -nb cpu -pme cpu -bonded cpu -update cpu"
+cpus = 40
+
+[configs.perf-gpu-nb]
+args = "-ntmpi 1 -ntomp 8 -nb gpu -pme cpu -bonded cpu -update cpu"
+gpu = true
+cpus = 40
+
+[configs.perf-gpu-nbpme]
+args = "-ntmpi 1 -ntomp 8 -nb gpu -pme gpu -bonded cpu -update cpu"
+gpu = true
+cpus = 40
+
+[configs.perf-gpu-resident]
+args = "-ntmpi 1 -ntomp 8 -nb gpu -pme gpu -bonded gpu -update gpu"
+gpu = true
+cpus = 40
+
+[configs.perf-gpu-resident-graphs]
+args = "-ntmpi 1 -ntomp 8 -nb gpu -pme gpu -bonded gpu -update gpu"
+env = { GMX_CUDA_GRAPH = "1" }
+gpu = true
+cpus = 40
+
+# ----------------------------------------------------------------------------------------------
+# Quality suite
+#   Every case is run with every listed configuration by baseline (twice) and candidate.
+#   tiers: smoke (seconds, harness check) / quick (minutes, per-change) / full (longer, release)
+# ----------------------------------------------------------------------------------------------
+[quality]
+timeout = 1800
+gpu_slots = 4
+
+[quality.tolerance]
+# Applied to step-0 forces/energies when outputs are not bitwise identical. For configurations that
+# are not reproducible run-to-run, the tolerance is max(value, noise_factor * measured noise).
+force_rel_rms = 1e-5
+energy_rel = 1e-5
+noise_factor = 10
+
+[quality.regressiontests]
+# Upstream regressiontests inputs (downloaded for the matching version), run as bitwise A/B cases.
+tiers = ["quick", "full"]
+sets = ["complex", "essentialdynamics"]
+configs = ["cpu-1r4t", "gpu-nb", "gpu-resident"]
+skip = []
+
+[[quality.cases]]
+name = "water-5k/pme"
+system = "water-5k"
+mdp = ["common", "@system", "water-pme"]
+nsteps = { smoke = 100, quick = 500, full = 2000 }
+out_every = 50
+configs = ["cpu-1r4t", "cpu-dd4", "cpu-dd4-pme1", "gpu-nb", "gpu-nbpme", "gpu-resident"]
+tiers = ["smoke", "quick", "full"]
+
+[[quality.cases]]
+name = "water-5k/rf"
+system = "water-5k"
+mdp = ["common", "@system", "water-pme", "water-rf"]
+nsteps = { quick = 500, full = 2000 }
+configs = ["cpu-1r4t", "cpu-dd4", "gpu-nb", "gpu-resident"]
+
+[[quality.cases]]
+name = "water-5k/ljpme"
+system = "water-5k"
+mdp = ["common", "@system", "water-pme", "water-ljpme"]
+nsteps = { quick = 500, full = 2000 }
+configs = ["cpu-1r4t", "cpu-dd4", "gpu-nb"]
+
+[[quality.cases]]
+name = "water-5k/vdw-switch"
+system = "water-5k"
+mdp = ["common", "@system", "water-pme", "water-switch"]
+nsteps = { quick = 500, full = 2000 }
+configs = ["cpu-1r4t", "gpu-nb"]
+
+[[quality.cases]]
+name = "water-5k/nve-md-vv"
+system = "water-5k"
+mdp = ["common", "@system", "water-pme", "nve-vv"]
+nsteps = { quick = 500, full = 2000 }
+configs = ["cpu-1r4t", "gpu-nb"]
+
+[[quality.cases]]
+name = "water-5k/sd"
+system = "water-5k"
+mdp = ["common", "@system", "water-pme", "sd"]
+nsteps = { quick = 500, full = 2000 }
+configs = ["cpu-1r4t", "gpu-resident"]
+
+[[quality.cases]]
+name = "water-5k/nose-hoover-pr"
+system = "water-5k"
+mdp = ["common", "@system", "water-pme", "nh-pr"]
+nsteps = { quick = 500, full = 2000 }
+configs = ["cpu-1r4t", "gpu-resident"]
+
+[[quality.cases]]
+name = "water-fep-41k/softcore"
+system = "water-fep-41k"
+mdp = ["common", "@system", "water-pme", "fep"]
+nsteps = { quick = 200, full = 1000 }
+configs = ["cpu-1r4t", "gpu-nb", "gpu-resident"]
+
+[[quality.cases]]
+name = "tip4p-35k/pme"
+system = "tip4p-35k"
+mdp = ["common", "@system", "water-pme"]
+nsteps = { quick = 200, full = 1000 }
+configs = ["cpu-1r4t", "cpu-dd4", "gpu-nbpme", "gpu-resident"]
+
+[[quality.cases]]
+name = "lysozyme/pme"
+system = "lysozyme"
+mdp = ["common", "protein"]
+nsteps = { smoke = 50, quick = 200, full = 1000 }
+configs = ["cpu-1r4t", "cpu-dd4", "cpu-dd4-pme1", "gpu-nb", "gpu-nbpme", "gpu-resident"]
+tiers = ["smoke", "quick", "full"]
+
+[[quality.cases]]
+name = "lysozyme/all-bonds"
+system = "lysozyme"
+mdp = ["common", "protein", "all-bonds"]
+nsteps = { quick = 200, full = 1000 }
+configs = ["cpu-1r4t", "gpu-resident"]
+
+[[quality.cases]]
+name = "lysozyme/hmr-4fs"
+system = "lysozyme"
+mdp = ["common", "protein", "hmr"]
+nsteps = { quick = 200, full = 1000 }
+configs = ["cpu-1r4t", "gpu-resident"]
+
+[[quality.cases]]
+name = "lysozyme-vsite/4fs"
+system = "lysozyme-vsite"
+mdp = ["common", "protein", "dt4fs"]
+nsteps = { quick = 200, full = 1000 }
+configs = ["cpu-1r4t", "cpu-dd4", "gpu-nbpme", "gpu-resident"]
+
+# ----------------------------------------------------------------------------------------------
+# Performance suite (end-to-end A/B + per-stage + GPU kernels)
+#   Run length is calibrated per case/config so the timed window lasts ~target_seconds.
+# ----------------------------------------------------------------------------------------------
+[perf]
+repeats = { smoke = 2, quick = 5, full = 9 }
+warmup = 1
+target_seconds = { smoke = 3, quick = 8, full = 20 }
+calib_steps = 2000
+reset_fraction = 0.25
+timeout = 1800
+tunepme = false          # PME tuning is timing-driven (non-deterministic work); off for A/B
+alpha = 0.05
+min_effect = 0.01        # significant effects below 1 % are reported as "negligible"
+stage_min_pct = 1.0      # stages/kernels below this share of the time are not compared
+nsys = { smoke = true, quick = true, full = true }
+nsys_repeats = { smoke = 1, quick = 2, full = 3 }
+nsys_steps = { smoke = 1000, quick = 3000, full = 5000 }
+
+[[perf.cases]]
+name = "water-5k/pme"
+system = "water-5k"
+mdp = ["common", "@system", "water-pme", "perf-out"]
+configs = ["perf-gpu-resident", "perf-gpu-resident-graphs", "perf-cpu"]
+tiers = ["smoke", "quick", "full"]
+
+[[perf.cases]]
+name = "water-41k/pme"
+system = "water-41k"
+mdp = ["common", "@system", "water-pme", "perf-out"]
+configs = ["perf-gpu-resident", "perf-gpu-nbpme", "perf-cpu"]
+
+[[perf.cases]]
+name = "water-41k/rf"
+system = "water-41k"
+mdp = ["common", "@system", "water-pme", "water-rf", "perf-out"]
+configs = ["perf-gpu-resident", "perf-cpu"]
+tiers = ["full"]
+
+[[perf.cases]]
+name = "water-332k/pme"
+system = "water-332k"
+mdp = ["common", "@system", "water-pme", "perf-out"]
+configs = ["perf-gpu-resident", "perf-gpu-nbpme"]
+calib_steps = 1000
+
+[[perf.cases]]
+name = "water-1m/pme"
+system = "water-1m"
+mdp = ["common", "@system", "water-pme", "perf-out"]
+configs = ["perf-gpu-resident"]
+calib_steps = 500
+tiers = ["full"]
+
+[[perf.cases]]
+name = "water-fep-41k/softcore"
+system = "water-fep-41k"
+mdp = ["common", "@system", "water-pme", "fep", "perf-out"]
+configs = ["perf-gpu-resident", "perf-cpu"]
+calib_steps = 1000
+
+[[perf.cases]]
+name = "tip4p-35k/pme"
+system = "tip4p-35k"
+mdp = ["common", "@system", "water-pme", "perf-out"]
+configs = ["perf-gpu-nbpme", "perf-cpu"]
+tiers = ["full"]
+
+[[perf.cases]]
+name = "lysozyme/pme"
+system = "lysozyme"
+mdp = ["common", "protein", "perf-out"]
+configs = ["perf-gpu-resident", "perf-gpu-nbpme", "perf-gpu-nb", "perf-cpu"]
+tiers = ["smoke", "quick", "full"]
+
+[[perf.cases]]
+name = "lysozyme/hmr-4fs"
+system = "lysozyme"
+mdp = ["common", "protein", "hmr", "perf-out"]
+configs = ["perf-gpu-resident"]
+tiers = ["full"]
+
+[[perf.cases]]
+name = "lysozyme-vsite/4fs"
+system = "lysozyme-vsite"
+mdp = ["common", "protein", "dt4fs", "perf-out"]
+configs = ["perf-gpu-nbpme", "perf-gpu-resident"]
+tiers = ["full"]
+
+# ----------------------------------------------------------------------------------------------
+# Isolated kernel micro-benchmarks (gmx nonbonded-benchmark: 36 flavours x {F, VF} per entry)
+# size = power-of-2 factor; the system has 3000 x size atoms
+# ----------------------------------------------------------------------------------------------
+[micro]
+repeats = { smoke = 2, quick = 5, full = 9 }
+alpha = 0.05
+min_effect = 0.01
+
+[[micro.nbnxm]]
+name = "nbnxm-3k-1t"
+size = 1
+threads = 1
+iter = { smoke = 50, quick = 200, full = 500 }
+tiers = ["smoke", "quick", "full"]
+
+[[micro.nbnxm]]
+name = "nbnxm-24k-1t"
+size = 8
+threads = 1
+iter = { quick = 30, full = 100 }
+
+[[micro.nbnxm]]
+name = "nbnxm-24k-20t"
+size = 8
+threads = 20
+iter = { quick = 200, full = 500 }
+
+[[micro.nbnxm]]
+name = "nbnxm-192k-20t"
+size = 64
+threads = 20
+iter = { full = 50 }
+tiers = ["full"]
+
+[[micro.nbnxm]]
+name = "nbnxm-24k-20t-rc1.2"
+size = 8
+threads = 20
+cutoff = 1.2
+iter = { full = 200 }
+tiers = ["full"]
+
+# ----------------------------------------------------------------------------------------------
+# Run-argument sweep (gmxbench sweep): which mdrun arguments are best for each use case
+# ----------------------------------------------------------------------------------------------
+[sweep]
+repeats = { smoke = 1, quick = 2, full = 3 }
+target_seconds = { smoke = 3, quick = 6, full = 15 }
+calib_steps = 1000
+timeout = 1800
+min_gain = 0.01          # a later stage must beat the incumbent by 1 % to add its arguments
+
+[sweep.dims]
+cpu_layouts = ["1x20", "1x40", "2x10", "4x5", "5x4", "4x10", "10x2"]   # ranks x OpenMP threads
+gpu_offload = ["gpu-nb", "gpu-nb-pme", "gpu-resident", "gpu-resident-bondedcpu"]
+gpu_threads = [4, 8, 16]
+nstlist = [50, 80, 150, 200, 300]
+concurrency = [2, 4]
+tunepme = true
+
+[[sweep.systems]]
+name = "water-5k"
+system = "water-5k"
+mdp = ["common", "@system", "water-pme", "perf-out"]
+tiers = ["smoke", "quick", "full"]
+
+[[sweep.systems]]
+name = "water-41k"
+system = "water-41k"
+mdp = ["common", "@system", "water-pme", "perf-out"]
+
+[[sweep.systems]]
+name = "water-332k"
+system = "water-332k"
+mdp = ["common", "@system", "water-pme", "perf-out"]
+tiers = ["full"]
+
+[[sweep.systems]]
+name = "water-fep-41k"
+system = "water-fep-41k"
+mdp = ["common", "@system", "water-pme", "fep", "perf-out"]
+tiers = ["full"]
+
+[[sweep.systems]]
+name = "lysozyme"
+system = "lysozyme"
+mdp = ["common", "protein", "perf-out"]
