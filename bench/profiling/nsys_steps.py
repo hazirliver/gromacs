@@ -107,7 +107,13 @@ def subtract(a, b):
     return out
 
 
-def clip(iv, lo, hi):
+def clip(iv, lo, hi, starts=None):
+    """Intervals of the merged, sorted list iv clipped to [lo, hi]; `starts` (np array of iv starts)
+    makes it O(log n + k)."""
+    if starts is not None:
+        i0 = max(0, int(np.searchsorted(starts, lo, side="right")) - 1)
+        i1 = int(np.searchsorted(starts, hi, side="left"))
+        iv = iv[i0:i1]
     return [(max(s, lo), min(e, hi)) for s, e in iv if e > lo and s < hi]
 
 
@@ -150,8 +156,14 @@ def main(argv=None):
     kinds = {1: "HtoD", 2: "DtoH", 3: "HtoA", 4: "AtoH", 8: "DtoD", 10: "PtoP"}
     if has_table(db, "ENUM_CUDA_MEMCPY_OPER"):
         kinds = {r[0]: r[1] for r in q(db, "SELECT id, name FROM ENUM_CUDA_MEMCPY_OPER")}
-    mem = [{"s": r[0], "e": r[1], "stream": r[2], "corr": r[3], "bytes": r[4],
-            "kind": re.sub(r"^CUDA_MEMCPY_OPER_", "", str(kinds.get(r[5], r[5])))} for r in mrows]
+    norm = {"HTOD": "HtoD", "DTOH": "DtoH", "DTOD": "DtoD", "HTOH": "HtoH", "PTOP": "PtoP"}
+
+    def kind_name(k):
+        s = str(kinds.get(k, k)).split("_")[-1]   # CUDA_MEMCPY_KIND_DTOH / CUDA_MEMCPY_OPER_DTOH -> DTOH
+        return norm.get(s.upper(), s)
+
+    mem = [{"s": r[0], "e": r[1], "stream": r[2], "corr": r[3], "bytes": r[4], "kind": kind_name(r[5])}
+           for r in mrows]
     srows = q(db, "SELECT start, end, streamId, correlationId, bytes FROM CUPTI_ACTIVITY_KIND_MEMSET") \
         if has_table(db, "CUPTI_ACTIVITY_KIND_MEMSET") else []
     mset = [{"s": r[0], "e": r[1], "stream": r[2], "corr": r[3], "bytes": r[4], "kind": "memset"} for r in srows]
@@ -317,6 +329,8 @@ def main(argv=None):
                 api_by_step[i][name] += e - s
                 api_cnt[i][name] += 1
         rows = []
+        kiv_starts = np.array([x[0] for x in kiv], dtype=np.int64)
+        co_starts = np.array([x[0] for x in copy_only], dtype=np.int64)
         for i in range(n):
             xs = act_by_step.get(i, [])
             k_iv = merge([(x["s"], x["e"]) for x in xs if x["cls"] == "kernel"])
@@ -334,8 +348,8 @@ def main(argv=None):
                    "DtoH_us": sum(x["e"] - x["s"] for x in xs if x["cls"] == "DtoH") / 1000}
             if g0 is not None and g1 is not None and g1 > g0:
                 win = (g0, g1)
-                kb_ = union_length(clip(kiv, *win))  # any kernel, also from neighbouring steps
-                cb_ = union_length(clip(subtract(civ, kiv), *win))
+                kb_ = union_length(clip(kiv, *win, starts=kiv_starts))  # any kernel, also from neighbouring steps
+                cb_ = union_length(clip(copy_only, *win, starts=co_starts))
                 row.update({"gpu_period_us": (g1 - g0) / 1000, "gpu_kernel_busy_us": kb_ / 1000,
                             "gpu_copy_only_us": cb_ / 1000, "gpu_idle_us": (g1 - g0 - kb_ - cb_) / 1000})
             for name in ("cudaStreamSynchronize", "cudaEventSynchronize", "cudaLaunchKernel",
@@ -371,6 +385,39 @@ def main(argv=None):
                 resid[(base + r["i"]) % a.nstlist].append(r["cpu_period_us"])
             res["residue_mod_nstlist_cpu_period_us"] = {str(k): float(np.mean(v)) for k, v in sorted(resid.items())}
         res["_rows"] = rows
+        # anatomy: per step type, median start/end of each GPU activity relative to the first GPU
+        # activity launched in the step, and median CPU NVTX sub-range offsets relative to the step start
+        anat = {}
+        for t in sorted(set(types)):
+            idx = [i for i in range(n - 1) if types[i] == t]
+            acc = defaultdict(lambda: [[], [], []])
+            for i in idx:
+                xs = act_by_step.get(i, [])
+                if not xs:
+                    continue
+                g0 = min(x["s"] for x in xs)
+                seen = Counter()
+                for x in sorted(xs, key=lambda x: x["s"]):
+                    nm = (x["name"] if x["cls"] == "kernel" else f"[{x['cls']} {x['bytes']}B]")
+                    seen[nm] += 1
+                    key = f"{nm}#{seen[nm]}" if seen[nm] > 1 else nm
+                    acc[key][0].append((x["s"] - g0) / 1000)
+                    acc[key][1].append((x["e"] - g0) / 1000)
+                    acc[key][2].append(x["stream"])
+            ent = sorted([{"what": k, "stream": Counter(v[2]).most_common(1)[0][0], "n": len(v[0]),
+                           "start_us": float(np.median(v[0])), "end_us": float(np.median(v[1]))}
+                          for k, v in acc.items() if len(v[0]) >= max(1, len(idx) // 2)], key=lambda x: x["start_us"])
+            cpu = defaultdict(lambda: [[], []])
+            for s_, e_, tt in main_ranges:
+                i = idx_of(s_)
+                if 0 <= i < n - 1 and types[i] == t and s_ <= st[i, 1]:
+                    cpu[tt][0].append((s_ - st[i, 0]) / 1000)
+                    cpu[tt][1].append((e_ - s_) / 1000)
+            cpu_ent = sorted([{"range": k, "first_start_us": float(np.median(v[0])),
+                               "total_us_per_step": float(np.sum(v[1])) / max(1, len(idx))}
+                              for k, v in cpu.items()], key=lambda x: x["first_start_us"])
+            anat[t] = {"steps": len(idx), "gpu": ent, "cpu_nvtx": cpu_ent}
+        res["anatomy"] = anat
 
     # ---------------------------------------------------------------- CPU API summary (main thread)
     api_tot = defaultdict(lambda: [0, 0])
@@ -449,6 +496,17 @@ def report(res):
                   f"idle mean {e.get('gpu_idle_us', {}).get('mean', 0):6.1f} | launches {e.get('launches', 0):5.1f} "
                   f"copies {e.get('copies', 0):4.1f} ({e.get('copy_bytes', 0)/1e6:5.2f} MB) "
                   f"H2D {e.get('HtoD_us', 0):6.1f} D2H {e.get('DtoH_us', 0):6.1f} us")
+    if "anatomy" in res:
+        for t in ("plain", "energy", "ns+energy"):
+            a = res["anatomy"].get(t)
+            if not a:
+                continue
+            print(f"\nanatomy of '{t}' steps (n={a['steps']}): GPU activities (median start-end us from first GPU activity)")
+            for x in a["gpu"]:
+                print(f"   s{x['stream']:<3} {x['start_us']:8.1f} - {x['end_us']:8.1f}  {x['what'][:90]}")
+            print("  CPU NVTX ranges (median first start from step start, total us per step):")
+            for x in a["cpu_nvtx"]:
+                print(f"   {x['first_start_us']:8.1f}  {x['total_us_per_step']:8.1f}  {x['range']}")
     print("\nCUDA API on main thread (us/step, calls/step):")
     for x in res["api_main_thread"][:12]:
         print(f"  {x['us_per_step']:8.1f} {x['calls_per_step']:6.2f} {x['name']}")

@@ -1,0 +1,28 @@
+# THROWAWAY EXPERIMENT (code change in /home/asokolov/Projects/gromacs-exp-nbminblocks, not in src/):
+# NB kernel __launch_bounds__ minimum blocks per SM 16 (upstream, build P) vs 20 / 24 (sm_89).
+# Numbers are kept separate from the main comparison (quality suite not run on these builds).
+repeats = 5
+
+[builds]
+P = "~/.cache/gmxbench/builds/3bf7713a0dd56c41"
+MB20 = "~/.cache/gmxbench/builds/16975953e72a9b65"
+MB24 = "~/.cache/gmxbench/builds/f5b973e5f3b87e02"
+
+[tprs]
+prod = "bench/results/profiling-2026-10-06/raw/inputs/prod/topol.tpr"
+
+[defaults]
+tpr = "prod"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+nsteps = 25000
+resetstep = 5000
+
+[[variant]]
+name = "mb16-P"
+build = "P"
+[[variant]]
+name = "mb20"
+build = "MB20"
+[[variant]]
+name = "mb24"
+build = "MB24"

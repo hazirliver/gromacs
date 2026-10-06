@@ -16,7 +16,9 @@ if [ "${NSYS_LIGHT:-0}" = 1 ]; then
     opts=(--trace=cuda,nvtx --sample=none --cpuctxsw=none --cuda-graph-trace=node)
 else
     opts=(--trace=cuda,nvtx,osrt --sample=process-tree --sampling-period=500000 --backtrace=none --cpuctxsw=process-tree
-          --cuda-graph-trace=node --gpu-metrics-devices=0 --gpu-metrics-frequency=20000)
+          --cuda-graph-trace=node)
+    # GPU metrics sampling needs the GPU performance counters (unavailable while DCGM profiling runs)
+    [ "${NSYS_GPU_METRICS:-0}" = 1 ] && opts+=(--gpu-metrics-devices=0 --gpu-metrics-frequency=20000)
 fi
 # shellcheck disable=SC2206
 [ -n "${NSYS_OPTS:-}" ] && opts+=(${NSYS_OPTS})

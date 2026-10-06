@@ -1,0 +1,20 @@
+# Throwaway build profiles for the NB-kernel launch-bounds experiment (worktree
+# /home/asokolov/Projects/gromacs-exp-nbminblocks, patch: MIN_BLOCKS_PER_MP via -DGMX_EXP_NB_MIN_BLOCKS_PER_MP).
+# Production-like (no sub-counters/NVTX), like profile cuda-nosub.
+[profiles.cuda-nosub-mb16]
+description = "cuda-nosub, throwaway worktree, NB kernel min blocks/SM 16 (= upstream default; build-path control)"
+cuda_arch = "auto"
+cmake = ["-DCMAKE_BUILD_TYPE=Release", "-DGMX_GPU=CUDA", "-DGMX_BUILD_OWN_FFTW=ON", "-DGMXAPI=OFF",
+         "-DGMX_INSTALL_NBLIB_API=OFF", "-DREGRESSIONTEST_DOWNLOAD=OFF"]
+
+[profiles.cuda-nosub-mb20]
+description = "cuda-nosub, NB kernel min blocks/SM 20 (<= 51 regs/thread, 83% occupancy on sm_89)"
+cuda_arch = "auto"
+cmake = ["-DCMAKE_BUILD_TYPE=Release", "-DGMX_GPU=CUDA", "-DGMX_BUILD_OWN_FFTW=ON", "-DGMXAPI=OFF",
+         "-DGMX_INSTALL_NBLIB_API=OFF", "-DREGRESSIONTEST_DOWNLOAD=OFF", "-DCMAKE_CUDA_FLAGS=-DGMX_EXP_NB_MIN_BLOCKS_PER_MP=20"]
+
+[profiles.cuda-nosub-mb24]
+description = "cuda-nosub, NB kernel min blocks/SM 24 (<= 42 regs/thread, 100% occupancy on sm_89)"
+cuda_arch = "auto"
+cmake = ["-DCMAKE_BUILD_TYPE=Release", "-DGMX_GPU=CUDA", "-DGMX_BUILD_OWN_FFTW=ON", "-DGMXAPI=OFF",
+         "-DGMX_INSTALL_NBLIB_API=OFF", "-DREGRESSIONTEST_DOWNLOAD=OFF", "-DCMAKE_CUDA_FLAGS=-DGMX_EXP_NB_MIN_BLOCKS_PER_MP=24"]
