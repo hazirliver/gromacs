@@ -37,3 +37,10 @@ cuda_arch = "auto"
 cmake = ["-DCMAKE_BUILD_TYPE=Release", "-DGMX_GPU=CUDA", "-DGMX_BUILD_OWN_FFTW=ON", "-DGMXAPI=OFF",
          "-DGMX_INSTALL_NBLIB_API=OFF", "-DREGRESSIONTEST_DOWNLOAD=OFF",
          "-DCMAKE_CXX_FLAGS=-DGMX_EXP_BONDED_STREAM", "-DCMAKE_CUDA_FLAGS=-DGMX_EXP_BONDED_STREAM"]
+
+[profiles.cuda-nosub-combo]
+description = "cuda-nosub, OpenMP for nvcc host code + GPU bonded kernel in its own stream"
+cuda_arch = "auto"
+cmake = ["-DCMAKE_BUILD_TYPE=Release", "-DGMX_GPU=CUDA", "-DGMX_BUILD_OWN_FFTW=ON", "-DGMXAPI=OFF",
+         "-DGMX_INSTALL_NBLIB_API=OFF", "-DREGRESSIONTEST_DOWNLOAD=OFF",
+         "-DCMAKE_CXX_FLAGS=-DGMX_EXP_BONDED_STREAM", "-DCMAKE_CUDA_FLAGS=-Xcompiler=-fopenmp -DGMX_EXP_BONDED_STREAM"]

@@ -1,0 +1,197 @@
+diff --git a/src/gromacs/gpu_utils/device_stream_manager.cpp b/src/gromacs/gpu_utils/device_stream_manager.cpp
+index e3fe9324e6..f0346a75e0 100644
+--- a/src/gromacs/gpu_utils/device_stream_manager.cpp
++++ b/src/gromacs/gpu_utils/device_stream_manager.cpp
+@@ -93,8 +93,17 @@ DeviceStreamManager::Impl::Impl(const DeviceInformation& deviceInfo,
+     context_.activate();
+     try
+     {
++        // THROWAWAY EXPERIMENT (profiling session 2026-10-06): -DGMX_EXP_SWAP_STREAM_PRIO gives the
++        // nonbonded local stream high and the PME stream normal priority (upstream: the opposite).
++#ifdef GMX_EXP_SWAP_STREAM_PRIO
++        constexpr DeviceStreamPriority c_nbLocalPrio = DeviceStreamPriority::High;
++        constexpr DeviceStreamPriority c_pmePrio     = DeviceStreamPriority::Normal;
++#else
++        constexpr DeviceStreamPriority c_nbLocalPrio = DeviceStreamPriority::Normal;
++        constexpr DeviceStreamPriority c_pmePrio     = DeviceStreamPriority::High;
++#endif
+         streams_[DeviceStreamType::NonBondedLocal] =
+-                std::make_unique<DeviceStream>(context_, DeviceStreamPriority::Normal, useTiming);
++                std::make_unique<DeviceStream>(context_, c_nbLocalPrio, useTiming);
+ 
+         if (simulationWork.useGpuPme)
+         {
+@@ -102,8 +111,7 @@ DeviceStreamManager::Impl::Impl(const DeviceInformation& deviceInfo,
+              * - default high priority with CUDA
+              * - no priorities implemented yet with OpenCL; see #2532
+              */
+-            streams_[DeviceStreamType::Pme] =
+-                    std::make_unique<DeviceStream>(context_, DeviceStreamPriority::High, useTiming);
++            streams_[DeviceStreamType::Pme] = std::make_unique<DeviceStream>(context_, c_pmePrio, useTiming);
+         }
+ 
+         if (simulationWork.havePpDomainDecomposition)
+diff --git a/src/gromacs/listed_forces/listed_forces_gpu.h b/src/gromacs/listed_forces/listed_forces_gpu.h
+index ea781262fb..b2127dae89 100644
+--- a/src/gromacs/listed_forces/listed_forces_gpu.h
++++ b/src/gromacs/listed_forces/listed_forces_gpu.h
+@@ -197,6 +197,11 @@ public:
+     /*! \brief Launches the transfer of computed bonded energies.
+      */
+     void launchEnergyTransfer();
++#ifdef GMX_EXP_BONDED_STREAM
++    /*! \brief THROWAWAY EXPERIMENT: make the parent (NB local) stream wait for the bonded kernel,
++     * which runs in its own stream. Call after the local nonbonded work has been launched. */
++    void enqueueWaitForKernel();
++#endif
+ 
+     /*! \brief Waits on the energy transfer, and accumulates bonded energies to \c enerd.
+      *
+diff --git a/src/gromacs/listed_forces/listed_forces_gpu_impl.h b/src/gromacs/listed_forces/listed_forces_gpu_impl.h
+index 050a0d4f47..b0498690a1 100644
+--- a/src/gromacs/listed_forces/listed_forces_gpu_impl.h
++++ b/src/gromacs/listed_forces/listed_forces_gpu_impl.h
+@@ -50,6 +50,12 @@
+ #include "config.h"
+ 
+ #include "gromacs/gpu_utils/gputraits.h"
++#ifdef GMX_EXP_BONDED_STREAM
++#    include <memory>
++
++#    include "gromacs/gpu_utils/device_stream.h"
++#    include "gromacs/gpu_utils/gpueventsynchronizer.h"
++#endif
+ #include "gromacs/gpu_utils/hostallocator.h"
+ #include "gromacs/listed_forces/listed_forces_gpu.h"
+ #include "gromacs/pbcutil/pbc_aiuc.h"
+@@ -167,6 +173,9 @@ public:
+     bool haveInteractions() const;
+     /*! \brief Launches the transfer of computed bonded energies. */
+     void launchEnergyTransfer();
++#ifdef GMX_EXP_BONDED_STREAM
++    void enqueueWaitForKernel();
++#endif
+     /*! \brief Waits on the energy transfer, and accumulates bonded energies to \c enerd. */
+     void waitAccumulateEnergyTerms(gmx_enerdata_t* enerd);
+     /*! \brief Clears the device side energy buffer */
+@@ -201,6 +210,13 @@ private:
+     const DeviceContext& deviceContext_;
+     //! \brief Bonded GPU stream, not owned by this module
+     const DeviceStream& deviceStream_;
++#ifdef GMX_EXP_BONDED_STREAM
++    //! THROWAWAY EXPERIMENT: own stream for the bonded kernel, so it can overlap the NB kernel
++    std::unique_ptr<DeviceStream> bondedStream_;
++    GpuEventSynchronizer          parentReady_;
++    GpuEventSynchronizer          bondedDone_;
++    bool                          bondedDonePending_ = false;
++#endif
+ 
+     //! Parameters, passed to the GPU kernel
+     BondedGpuKernelParameters kernelParams_;
+diff --git a/src/gromacs/listed_forces/listed_forces_gpu_impl_gpu.cpp b/src/gromacs/listed_forces/listed_forces_gpu_impl_gpu.cpp
+index d6e8afe93d..88de138cce 100644
+--- a/src/gromacs/listed_forces/listed_forces_gpu_impl_gpu.cpp
++++ b/src/gromacs/listed_forces/listed_forces_gpu_impl_gpu.cpp
+@@ -106,6 +106,9 @@ ListedForcesGpu::Impl::Impl(const gmx_ffparams_t& ffparams,
+             "(calcVir=true)");
+ 
+     wcycle_ = wcycle;
++#ifdef GMX_EXP_BONDED_STREAM
++    bondedStream_ = std::make_unique<DeviceStream>(deviceContext_, DeviceStreamPriority::Normal, false);
++#endif
+ 
+     allocateDeviceBuffer(&d_forceParams_, ffparams.numTypes(), deviceContext_);
+     // This could be an async transfer (if the source is pinned), so
+@@ -359,6 +362,22 @@ bool ListedForcesGpu::Impl::haveInteractions() const
+     return haveInteractions_;
+ }
+ 
++#ifdef GMX_EXP_BONDED_STREAM
++void ListedForcesGpu::Impl::enqueueWaitForKernel()
++{
++    if (bondedDonePending_)
++    {
++        bondedDone_.enqueueWaitEvent(deviceStream_);
++        bondedDonePending_ = false;
++    }
++}
++
++void ListedForcesGpu::enqueueWaitForKernel()
++{
++    impl_->enqueueWaitForKernel();
++}
++#endif
++
+ void ListedForcesGpu::Impl::launchEnergyTransfer()
+ {
+     GMX_ASSERT(haveInteractions_,
+diff --git a/src/gromacs/listed_forces/listed_forces_gpu_internal.cu b/src/gromacs/listed_forces/listed_forces_gpu_internal.cu
+index fe5b140451..4623380cc3 100644
+--- a/src/gromacs/listed_forces/listed_forces_gpu_internal.cu
++++ b/src/gromacs/listed_forces/listed_forces_gpu_internal.cu
+@@ -283,12 +283,28 @@ void ListedForcesGpu::Impl::launchKernel()
+     const auto kernelArgs = prepareGpuKernelArguments(
+             kernelPtr, kernelLaunchConfig_, &kernelParams_, &kernelBuffers_, &d_xq_, &d_f_, &d_fShift_);
+ 
++#ifdef GMX_EXP_BONDED_STREAM
++    // THROWAWAY EXPERIMENT: run in an own stream after everything already queued in the parent
++    // (NB local) stream (x->nbat conversion, force-buffer clearing, list uploads); the parent stream
++    // waits for completion only after the NB kernel has been launched (enqueueWaitForKernel()).
++    parentReady_.markEvent(deviceStream_);
++    parentReady_.enqueueWaitEvent(*bondedStream_);
++    launchGpuKernel(kernelPtr,
++                    kernelLaunchConfig_,
++                    *bondedStream_,
++                    nullptr,
++                    "bonded_kernel_gpu<calcVir, calcEner>",
++                    kernelArgs);
++    bondedDone_.markEvent(*bondedStream_);
++    bondedDonePending_ = true;
++#else
+     launchGpuKernel(kernelPtr,
+                     kernelLaunchConfig_,
+                     deviceStream_,
+                     nullptr,
+                     "bonded_kernel_gpu<calcVir, calcEner>",
+                     kernelArgs);
++#endif
+ 
+     wallcycle_sub_stop(wcycle_, WallCycleSubCounter::LaunchGpuBonded);
+     wallcycle_stop(wcycle_, WallCycleCounter::LaunchGpuPp);
+diff --git a/src/gromacs/mdlib/sim_util.cpp b/src/gromacs/mdlib/sim_util.cpp
+index c9b4a71dff..a2a17f8b2d 100644
+--- a/src/gromacs/mdlib/sim_util.cpp
++++ b/src/gromacs/mdlib/sim_util.cpp
+@@ -1835,6 +1835,13 @@ void do_force(FILE*                         fplog,
+         wallcycle_start_nocount(wcycle, WallCycleCounter::LaunchGpuPp);
+         wallcycle_sub_start_nocount(wcycle, WallCycleSubCounter::LaunchGpuNonBonded);
+         do_nb_verlet(fr, ic, enerd, stepWork, InteractionLocality::Local, enbvClearFNo, step, nrnb, wcycle);
++#ifdef GMX_EXP_BONDED_STREAM
++        // THROWAWAY EXPERIMENT: the bonded kernel runs in its own stream; join it here
++        if (domainWork.haveGpuBondedWork && !simulationWork.havePpDomainDecomposition)
++        {
++            fr->listedForcesGpu->enqueueWaitForKernel();
++        }
++#endif
+         /* launch local nonbonded free energy work on GPU */
+         if (domainWork.haveGpuNonbondedFreeEnergyWork && stepWork.computeNonbondedForces)
+         {
+diff --git a/src/gromacs/nbnxm/cuda/nbnxm_cuda_kernel.cuh b/src/gromacs/nbnxm/cuda/nbnxm_cuda_kernel.cuh
+index 1156eca6c3..d612b5db12 100644
+--- a/src/gromacs/nbnxm/cuda/nbnxm_cuda_kernel.cuh
++++ b/src/gromacs/nbnxm/cuda/nbnxm_cuda_kernel.cuh
+@@ -130,7 +130,13 @@ namespace gmx
+  * Note: convenience macros, need to be undef-ed at the end of the file.
+  */
+ #define NTHREAD_Z (1)
+-#define MIN_BLOCKS_PER_MP (16)
++// THROWAWAY EXPERIMENT (profiling session 2026-10-06): minimum resident blocks per SM is a
++// compile-time knob, e.g. -DGMX_EXP_NB_MIN_BLOCKS_PER_MP=24 (Ada sm_89: 48 warps/SM, 24 blocks/SM).
++#ifdef GMX_EXP_NB_MIN_BLOCKS_PER_MP
++#    define MIN_BLOCKS_PER_MP (GMX_EXP_NB_MIN_BLOCKS_PER_MP)
++#else
++#    define MIN_BLOCKS_PER_MP (16)
++#endif
+ #define THREADS_PER_BLOCK (c_clusterSize * c_clusterSize * NTHREAD_Z)
+ 
+ /**@}*/

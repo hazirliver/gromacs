@@ -155,6 +155,11 @@ def collect(results: Path):
         rows.extend(json.loads(rp.read_text()))
     for i, r in enumerate(rows):
         r.setdefault("id", f"M{i + 1:04d}")
+        if str(r.get("experiment", "")).startswith("exp-"):
+            gated = r.get("config") in ("ompcuda", "bondedstream", "combo", "combo-t20", "mb16-P", "P", "P-t20")
+            r["note"] = ((r.get("note") or "") + " THROWAWAY build outside src/ (worktree gromacs-exp-nbminblocks); "
+                         + ("gmxbench quality --strict passed" if gated else "quality gate not run")).strip()
+            r["overhead"] = r.get("overhead", "") + "; throwaway"
     (results / "summary.json").write_text(json.dumps(rows, indent=1, default=str))
     keys = ["id", "source", "experiment", "config", "step_type", "metric", "unit", "value", "ci95_lo", "ci95_hi",
             "min", "max", "n", "overhead", "build", "tpr", "env", "cmd", "note"]
