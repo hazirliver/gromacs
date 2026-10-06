@@ -1,0 +1,38 @@
+# Kernel-variant environment knobs on the production configuration.
+repeats = 5
+[builds]
+P = "~/.cache/gmxbench/builds/3bf7713a0dd56c41"   # cuda-nosub (production-like)
+S = "~/.cache/gmxbench/builds/780edef73168a96d"   # cuda: cycle sub-counters + NVTX
+
+[tprs]
+prod = "bench/results/profiling-2026-10-06/raw/inputs/prod/topol.tpr"
+
+[defaults]
+build = "P"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+nsteps = 25000
+resetstep = 5000
+
+[[variant]]
+name = "default"
+[[variant]]
+name = "tab-ewald"
+env = { GMX_GPU_NB_TAB_EWALD = "1" }
+[[variant]]
+name = "ewald-twincut"
+env = { GMX_GPU_NB_EWALD_TWINCUT = "1" }
+[[variant]]
+name = "min-ci-0"
+env = { GMX_NB_MIN_CI = "0" }
+[[variant]]
+name = "prune8"
+env = { GMX_NSTLIST_DYNAMICPRUNING = "8" }
+[[variant]]
+name = "prune32"
+env = { GMX_NSTLIST_DYNAMICPRUNING = "32" }
+[[variant]]
+name = "noprune"
+env = { GMX_DISABLE_DYNAMICPRUNING = "1" }
+[[variant]]
+name = "no-alt-wait"
+env = { GMX_DISABLE_ALTERNATING_GPU_WAIT = "1" }

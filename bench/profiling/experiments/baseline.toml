@@ -1,0 +1,29 @@
+# H1 baseline: production command line on the production build (P) and on the sub-counter/NVTX
+# build (S, tool-overhead check), plus plain `gmx mdrun` (only -nsteps/-resetstep/-noconfout added).
+repeats = 5
+
+[builds]
+P = "~/.cache/gmxbench/builds/3bf7713a0dd56c41"   # cuda-nosub (production-like)
+S = "~/.cache/gmxbench/builds/780edef73168a96d"   # cuda: cycle sub-counters + NVTX
+
+[tprs]
+prod = "bench/results/profiling-2026-10-06/raw/inputs/prod/topol.tpr"
+
+[defaults]
+build = "P"
+tpr = "prod"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+nsteps = 25000
+resetstep = 5000
+
+[[variant]]
+name = "prod-P"
+
+[[variant]]
+name = "prod-S"
+build = "S"
+
+[[variant]]
+name = "plain-P"
+args = "-pin auto"
+tunepme = true

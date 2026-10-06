@@ -1,0 +1,43 @@
+# H4: energy/virial and global communication intervals.
+repeats = 5
+[builds]
+P = "~/.cache/gmxbench/builds/3bf7713a0dd56c41"   # cuda-nosub (production-like)
+S = "~/.cache/gmxbench/builds/780edef73168a96d"   # cuda: cycle sub-counters + NVTX
+
+[tprs]
+prod = "bench/results/profiling-2026-10-06/raw/inputs/prod/topol.tpr"
+nstcalc500 = "bench/results/profiling-2026-10-06/raw/inputs/nstcalc500/topol.tpr"
+nstcalc1000 = "bench/results/profiling-2026-10-06/raw/inputs/nstcalc1000/topol.tpr"
+nstglob500 = "bench/results/profiling-2026-10-06/raw/inputs/nstglob500/topol.tpr"
+nstglob1000 = "bench/results/profiling-2026-10-06/raw/inputs/nstglob1000/topol.tpr"
+perfout = "bench/results/profiling-2026-10-06/raw/inputs/prod-perfout/topol.tpr"
+
+[defaults]
+build = "P"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+nsteps = 25000
+resetstep = 5000
+
+[[variant]]
+name = "prod"
+tpr = "prod"
+
+[[variant]]
+name = "nstcalc500"
+tpr = "nstcalc500"
+
+[[variant]]
+name = "nstcalc1000"
+tpr = "nstcalc1000"
+
+[[variant]]
+name = "nstglob500"
+tpr = "nstglob500"
+
+[[variant]]
+name = "nstglob1000"
+tpr = "nstglob1000"
+
+[[variant]]
+name = "perfout"
+tpr = "perfout"

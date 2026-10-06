@@ -1,0 +1,29 @@
+# H4: thread placement (VM: 1 socket, 1 NUMA node, 20 cores x 2 HT, so no GPU-local vs remote socket).
+repeats = 5
+[builds]
+P = "~/.cache/gmxbench/builds/3bf7713a0dd56c41"   # cuda-nosub (production-like)
+S = "~/.cache/gmxbench/builds/780edef73168a96d"   # cuda: cycle sub-counters + NVTX
+
+[tprs]
+prod = "bench/results/profiling-2026-10-06/raw/inputs/prod/topol.tpr"
+
+[defaults]
+build = "P"
+nsteps = 25000
+resetstep = 5000
+
+[[variant]]
+name = "pin-auto-stride2"          # mdrun's choice: one thread per core on cores 0-15
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200 -pin on"
+[[variant]]
+name = "pin-stride1"               # 16 threads on 8 cores (both hyperthreads)
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200 -pin on -pinstride 1"
+[[variant]]
+name = "pin-offset8"               # one thread per core on cores 4-19
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200 -pin on -pinstride 2 -pinoffset 8"
+[[variant]]
+name = "pin-off"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200 -pin off"
+[[variant]]
+name = "t32-stride1"               # 32 threads on 16 cores
+args = "-ntmpi 1 -ntomp 32 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200 -pin on -pinstride 1"
