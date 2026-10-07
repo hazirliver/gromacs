@@ -283,12 +283,21 @@ void ListedForcesGpu::Impl::launchKernel()
     const auto kernelArgs = prepareGpuKernelArguments(
             kernelPtr, kernelLaunchConfig_, &kernelParams_, &kernelBuffers_, &d_xq_, &d_f_, &d_fShift_);
 
+    // The kernel runs in its own stream, after all work already enqueued in deviceStream_
+    // (coordinate conversion, force buffer clearing), so that it can overlap with the nonbonded
+    // kernel. deviceStream_ waits for it in enqueueWaitForKernel().
+    GMX_ASSERT(!kernelDoneWaitPending_,
+               "enqueueWaitForKernel() should be called after each kernel launch");
+    kernelCanStart_.markEvent(deviceStream_);
+    kernelCanStart_.enqueueWaitEvent(*kernelStream_);
     launchGpuKernel(kernelPtr,
                     kernelLaunchConfig_,
-                    deviceStream_,
+                    *kernelStream_,
                     nullptr,
                     "bonded_kernel_gpu<calcVir, calcEner>",
                     kernelArgs);
+    kernelDone_.markEvent(*kernelStream_);
+    kernelDoneWaitPending_ = true;
 
     wallcycle_sub_stop(wcycle_, WallCycleSubCounter::LaunchGpuBonded);
     wallcycle_stop(wcycle_, WallCycleCounter::LaunchGpuPp);

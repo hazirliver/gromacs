@@ -1835,6 +1835,11 @@ void do_force(FILE*                         fplog,
         wallcycle_start_nocount(wcycle, WallCycleCounter::LaunchGpuPp);
         wallcycle_sub_start_nocount(wcycle, WallCycleSubCounter::LaunchGpuNonBonded);
         do_nb_verlet(fr, ic, enerd, stepWork, InteractionLocality::Local, enbvClearFNo, step, nrnb, wcycle);
+        if (domainWork.haveGpuBondedWork && !simulationWork.havePpDomainDecomposition)
+        {
+            // The bonded kernel can run concurrently with the nonbonded kernel; join it here
+            fr->listedForcesGpu->enqueueWaitForKernel();
+        }
         /* launch local nonbonded free energy work on GPU */
         if (domainWork.haveGpuNonbondedFreeEnergyWork && stepWork.computeNonbondedForces)
         {
@@ -1945,6 +1950,11 @@ void do_force(FILE*                         fplog,
             wallcycle_start_nocount(wcycle, WallCycleCounter::LaunchGpuPp);
             wallcycle_sub_start(wcycle, WallCycleSubCounter::LaunchGpuNonBonded);
             do_nb_verlet(fr, ic, enerd, stepWork, InteractionLocality::NonLocal, enbvClearFNo, step, nrnb, wcycle);
+            if (domainWork.haveGpuBondedWork)
+            {
+                // The bonded kernel can run concurrently with the nonbonded kernel; join it here
+                fr->listedForcesGpu->enqueueWaitForKernel();
+            }
             /* launch non-local nonbonded free energy tsaks on GPU */
             if (domainWork.haveGpuNonbondedFreeEnergyWork && stepWork.computeNonbondedForces)
             {

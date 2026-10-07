@@ -193,6 +193,8 @@ void ListedForcesGpu::setPbcAndlaunchKernel(PbcType /* pbcType */,
 {
 }
 
+void ListedForcesGpu::enqueueWaitForKernel() {}
+
 void ListedForcesGpu::launchEnergyTransfer() {}
 
 void ListedForcesGpu::waitAccumulateEnergyTerms(gmx_enerdata_t* /* enerd */) {}

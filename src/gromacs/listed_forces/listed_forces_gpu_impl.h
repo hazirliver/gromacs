@@ -49,6 +49,10 @@
 
 #include "config.h"
 
+#include <memory>
+
+#include "gromacs/gpu_utils/device_stream.h"
+#include "gromacs/gpu_utils/gpueventsynchronizer.h"
 #include "gromacs/gpu_utils/gputraits.h"
 #include "gromacs/gpu_utils/hostallocator.h"
 #include "gromacs/listed_forces/listed_forces_gpu.h"
@@ -165,6 +169,8 @@ public:
     /*! \brief Returns whether there are bonded interactions
      * assigned to the GPU */
     bool haveInteractions() const;
+    /*! \brief Makes \c deviceStream_ wait for the last launched kernel. */
+    void enqueueWaitForKernel();
     /*! \brief Launches the transfer of computed bonded energies. */
     void launchEnergyTransfer();
     /*! \brief Waits on the energy transfer, and accumulates bonded energies to \c enerd. */
@@ -201,6 +207,16 @@ private:
     const DeviceContext& deviceContext_;
     //! \brief Bonded GPU stream, not owned by this module
     const DeviceStream& deviceStream_;
+    /*! \brief Stream the kernel runs in, so that it can overlap with the nonbonded kernel
+     *
+     * Only used with CUDA; the other backends launch the kernel in \c deviceStream_. */
+    std::unique_ptr<DeviceStream> kernelStream_;
+    //! Marks the point in \c deviceStream_ after which the kernel can start in \c kernelStream_
+    GpuEventSynchronizer kernelCanStart_;
+    //! Marks the completion of the kernel in \c kernelStream_
+    GpuEventSynchronizer kernelDone_;
+    //! Whether \c deviceStream_ still needs to wait for \c kernelDone_
+    bool kernelDoneWaitPending_ = false;
 
     //! Parameters, passed to the GPU kernel
     BondedGpuKernelParameters kernelParams_;

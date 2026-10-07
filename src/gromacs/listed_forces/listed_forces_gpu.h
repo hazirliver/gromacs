@@ -178,6 +178,11 @@ public:
 
     /*! \brief Launches bonded kernel on a GPU
      *
+     * With CUDA the kernel runs in a separate stream, so that it can overlap with the nonbonded
+     * kernel. It starts after all work already enqueued in the bonded stream passed at
+     * construction. enqueueWaitForKernel() must be called before any further work in that
+     * stream uses the forces, energies or shift forces.
+     *
      * \param[in]  stepWork  Simulation step work to determine if energy/virial are to be computed on this step.
      */
     void launchKernel(const gmx::StepWorkload& stepWork);
@@ -193,6 +198,13 @@ public:
                                const matrix             box,
                                bool                     canMoleculeSpanPbc,
                                const gmx::StepWorkload& stepWork);
+
+    /*! \brief Makes the bonded stream passed at construction wait for the last launched kernel
+     *
+     * Call after launching the work that should overlap with the bonded kernel (the nonbonded
+     * kernel) and before enqueueing anything that uses the bonded forces or energies.
+     */
+    void enqueueWaitForKernel();
 
     /*! \brief Launches the transfer of computed bonded energies.
      */

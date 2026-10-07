@@ -107,6 +107,12 @@ ListedForcesGpu::Impl::Impl(const gmx_ffparams_t& ffparams,
 
     wcycle_ = wcycle;
 
+    if constexpr (GMX_GPU_CUDA)
+    {
+        kernelStream_ =
+                std::make_unique<DeviceStream>(deviceContext_, DeviceStreamPriority::Normal, false);
+    }
+
     allocateDeviceBuffer(&d_forceParams_, ffparams.numTypes(), deviceContext_);
     // This could be an async transfer (if the source is pinned), so
     // long as it uses the same stream as the kernels and we are happy
@@ -359,11 +365,22 @@ bool ListedForcesGpu::Impl::haveInteractions() const
     return haveInteractions_;
 }
 
+void ListedForcesGpu::Impl::enqueueWaitForKernel()
+{
+    if (kernelDoneWaitPending_)
+    {
+        kernelDone_.enqueueWaitEvent(deviceStream_);
+        kernelDoneWaitPending_ = false;
+    }
+}
+
 void ListedForcesGpu::Impl::launchEnergyTransfer()
 {
     GMX_ASSERT(haveInteractions_,
                "No GPU bonded interactions, so no energies will be computed, so transfer should "
                "not be called");
+    GMX_ASSERT(!kernelDoneWaitPending_,
+               "enqueueWaitForKernel() should be called before transferring the energies");
     wallcycle_sub_start_nocount(wcycle_, WallCycleSubCounter::LaunchGpuBonded);
     // TODO add conditional on whether there has been any compute (and make sure host buffer doesn't contain garbage)
     float* h_vTot = vTot_.data();
@@ -457,6 +474,11 @@ void ListedForcesGpu::setPbcAndlaunchKernel(PbcType                  pbcType,
 {
     setPbc(pbcType, box, canMoleculeSpanPbc);
     launchKernel(stepWork);
+}
+
+void ListedForcesGpu::enqueueWaitForKernel()
+{
+    impl_->enqueueWaitForKernel();
 }
 
 void ListedForcesGpu::launchEnergyTransfer()
