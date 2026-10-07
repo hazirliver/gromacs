@@ -210,6 +210,16 @@ private:
     //! Allocation size for the reciprocal masses buffer
     int numInverseMassesAlloc_ = -1;
 
+    /*! \brief Stream for SETTLE, so that it can run concurrently with LINCS
+     *
+     * Null when SETTLE runs in \c deviceStream_. Declared before \c settleGpu_, which uses it,
+     * so that it is destroyed after it. */
+    std::unique_ptr<DeviceStream> settleStream_;
+    //! Marks the end of the integration, after which SETTLE can start in \c settleStream_
+    GpuEventSynchronizer settleCanStart_;
+    //! Marks the completion of SETTLE in \c settleStream_
+    GpuEventSynchronizer settleDone_;
+
     //! Leap-Frog integrator
     std::unique_ptr<LeapFrogGpu> integrator_;
     //! LINCS GPU object to use for non-water constraints

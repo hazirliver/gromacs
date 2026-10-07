@@ -53,6 +53,7 @@
 #include <cstdio>
 
 #include <algorithm>
+#include <vector>
 
 #include "gromacs/gpu_utils/capabilities.h"
 #include "gromacs/gpu_utils/device_context.h"
@@ -65,7 +66,9 @@
 #include "gromacs/mdlib/update_constrain_gpu_internal.h"
 #include "gromacs/mdtypes/mdatom.h"
 #include "gromacs/timing/wallcycle.h"
+#include "gromacs/topology/ifunc.h"
 #include "gromacs/topology/mtop_util.h"
+#include "gromacs/topology/topology.h"
 
 namespace gmx
 {
@@ -99,8 +102,18 @@ void UpdateConstrainGpu::Impl::integrate(GpuEventSynchronizer*             fRead
                 d_x_, d_x0_, d_v_, d_f_, dt, doTemperatureScaling, tcstat, doParrinelloRahman, dtPressureCouple, prVelocityScalingMatrix);
         if constexpr (GpuConfigurationCapabilities::Update)
         {
+            if (settleStream_)
+            {
+                settleCanStart_.markEvent(deviceStream_);
+                settleCanStart_.enqueueWaitEvent(*settleStream_);
+            }
             lincsGpu_->apply(d_x0_, d_x_, updateVelocities, d_v_, 1.0 / dt, computeVirial, virial, pbcAiuc_);
             settleGpu_->apply(d_x0_, d_x_, updateVelocities, d_v_, 1.0 / dt, computeVirial, virial, pbcAiuc_);
+            if (settleStream_)
+            {
+                settleDone_.markEvent(*settleStream_);
+                settleDone_.enqueueWaitEvent(deviceStream_);
+            }
         }
 
         // scaledVirial -> virial (methods above returns scaled values)
@@ -156,6 +169,47 @@ void UpdateConstrainGpu::Impl::scaleVelocities(const Matrix3x3& scalingMatrix)
     wallcycle_stop(wcycle_, WallCycleCounter::LaunchGpuPp);
 }
 
+/*! \brief Returns whether the topology has both SETTLE and other constraints, and no atom is
+ * constrained by both, so that SETTLE and LINCS can run concurrently.
+ *
+ * Constraints only act within molecules, so checking the molecule types is sufficient.
+ */
+static bool canRunSettleConcurrentlyWithLincs(const gmx_mtop_t& mtop)
+{
+    if (gmx_mtop_ftype_count(mtop, InteractionFunction::SETTLE) == 0
+        || gmx_mtop_ftype_count(mtop, InteractionFunction::Constraints)
+                           + gmx_mtop_ftype_count(mtop, InteractionFunction::ConstraintsNoCoupling)
+                   == 0)
+    {
+        return false;
+    }
+    for (const gmx_moltype_t& moltype : mtop.moltype)
+    {
+        std::vector<bool>      isSettleAtom(moltype.atoms.nr, false);
+        const InteractionList& settles = moltype.ilist[InteractionFunction::SETTLE];
+        for (int i = 0; i < settles.size(); i += 1 + NRAL(InteractionFunction::SETTLE))
+        {
+            for (int a = 1; a <= NRAL(InteractionFunction::SETTLE); a++)
+            {
+                isSettleAtom[settles.iatoms[i + a]] = true;
+            }
+        }
+        for (const auto ftype :
+             { InteractionFunction::Constraints, InteractionFunction::ConstraintsNoCoupling })
+        {
+            const InteractionList& constraints = moltype.ilist[ftype];
+            for (int i = 0; i < constraints.size(); i += 1 + NRAL(ftype))
+            {
+                if (isSettleAtom[constraints.iatoms[i + 1]] || isSettleAtom[constraints.iatoms[i + 2]])
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 UpdateConstrainGpu::Impl::Impl(const t_inputrec&    ir,
                                const gmx_mtop_t&    mtop,
                                const int            numTempScaleValues,
@@ -168,7 +222,15 @@ UpdateConstrainGpu::Impl::Impl(const t_inputrec&    ir,
     if constexpr (GpuConfigurationCapabilities::Update)
     {
         lincsGpu_ = std::make_unique<LincsGpu>(ir.nLincsIter, ir.nProjOrder, deviceContext_, deviceStream_);
-        settleGpu_ = std::make_unique<SettleGpu>(mtop, deviceContext_, deviceStream_);
+        // SETTLE and LINCS update disjoint sets of atoms, so SETTLE can run in its own stream
+        // concurrently with the (iterative, often sub-wave) LINCS kernel.
+        if (GMX_GPU_CUDA && canRunSettleConcurrentlyWithLincs(mtop))
+        {
+            settleStream_ =
+                    std::make_unique<DeviceStream>(deviceContext_, DeviceStreamPriority::High, false);
+        }
+        settleGpu_ = std::make_unique<SettleGpu>(
+                mtop, deviceContext_, settleStream_ ? *settleStream_ : deviceStream_);
     }
 }
 
