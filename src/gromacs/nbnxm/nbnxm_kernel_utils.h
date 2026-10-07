@@ -81,20 +81,23 @@ static inline GMX_ALWAYS_INLINE void ljForceSwitch(const shift_consts_t dispersi
     const float repuShiftV2 = repulsionShift.c2;
     const float repuShiftV3 = repulsionShift.c3;
 
-    const float r       = r2 * rInv;
-    const float rSwitch = gmxGpuFDim(r, rVdwSwitch); // max(r - rVdwSwitch, 0)
+    const float r        = r2 * rInv;
+    const float rSwitch  = gmxGpuFDim(r, rVdwSwitch); // max(r - rVdwSwitch, 0)
+    const float rSwitch2 = rSwitch * rSwitch;
 
+    // The common factors are pulled out explicitly: compilers do not re-associate floating-point
+    // expressions, and this is on the critical path of the pair interaction.
+    const float fSwitch =
+            c12 * (repuShiftV2 + repuShiftV3 * rSwitch) - c6 * (dispShiftV2 + dispShiftV3 * rSwitch);
     if constexpr (calcFr)
     {
         // calculate F*r
-        *f += -c6 * (dispShiftV2 + dispShiftV3 * rSwitch) * rSwitch * rSwitch * r
-              + c12 * (repuShiftV2 + repuShiftV3 * rSwitch) * rSwitch * rSwitch * r;
+        *f += fSwitch * (rSwitch2 * r);
     }
     else
     {
         // calculate F/r
-        *f += -c6 * (dispShiftV2 + dispShiftV3 * rSwitch) * rSwitch * rSwitch * rInv
-              + c12 * (repuShiftV2 + repuShiftV3 * rSwitch) * rSwitch * rSwitch * rInv;
+        *f += fSwitch * (rSwitch2 * rInv);
     }
 
     if constexpr (doCalcEnergies)
@@ -103,8 +106,9 @@ static inline GMX_ALWAYS_INLINE void ljForceSwitch(const shift_consts_t dispersi
         const float dispShiftF3 = dispShiftV3 / 4.0F;
         const float repuShiftF2 = repuShiftV2 / 3.0F;
         const float repuShiftF3 = repuShiftV3 / 4.0F;
-        *eLJ += c6 * (dispShiftF2 + dispShiftF3 * rSwitch) * rSwitch * rSwitch * rSwitch
-                - c12 * (repuShiftF2 + repuShiftF3 * rSwitch) * rSwitch * rSwitch * rSwitch;
+        const float eSwitch     = c6 * (dispShiftF2 + dispShiftF3 * rSwitch)
+                              - c12 * (repuShiftF2 + repuShiftF3 * rSwitch);
+        *eLJ += eSwitch * (rSwitch2 * rSwitch);
     }
 }
 
@@ -228,23 +232,22 @@ static inline GMX_ALWAYS_INLINE float pmeCorrF(const float z2)
     constexpr float FD1 = 0.50736591960530292870F;
     constexpr float FD0 = 1.0F;
 
-    const float z4 = z2 * z2;
+    // Horner form: every coefficient but the leading one is an immediate operand of an FMA,
+    // which is cheaper on GPUs than the Estrin form (fewer instructions and registers) at the
+    // same accuracy.
+    float polyFD = FD4 * z2 + FD3;
+    polyFD       = polyFD * z2 + FD2;
+    polyFD       = polyFD * z2 + FD1;
+    polyFD       = polyFD * z2 + FD0;
 
-    float       polyFD0 = FD4 * z4 + FD2;
-    const float polyFD1 = FD3 * z4 + FD1;
-    polyFD0             = polyFD0 * z4 + FD0;
-    polyFD0             = polyFD1 * z2 + polyFD0;
+    float polyFN = FN6 * z2 + FN5;
+    polyFN       = polyFN * z2 + FN4;
+    polyFN       = polyFN * z2 + FN3;
+    polyFN       = polyFN * z2 + FN2;
+    polyFN       = polyFN * z2 + FN1;
+    polyFN       = polyFN * z2 + FN0;
 
-    polyFD0 = 1.0F / polyFD0;
-
-    float polyFN0 = FN6 * z4 + FN4;
-    float polyFN1 = FN5 * z4 + FN3;
-    polyFN0       = polyFN0 * z4 + FN2;
-    polyFN1       = polyFN1 * z4 + FN1;
-    polyFN0       = polyFN0 * z4 + FN0;
-    polyFN0       = polyFN1 * z2 + polyFN0;
-
-    return polyFN0 * polyFD0;
+    return polyFN * (1.0F / polyFD);
 }
 
 /*! \brief Interpolate Ewald coulomb force correction using the F*r table. */

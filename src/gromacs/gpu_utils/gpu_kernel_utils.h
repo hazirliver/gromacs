@@ -102,8 +102,8 @@ static inline GMX_ALWAYS_INLINE float gmxGpuFDim(const float one, const float tw
 #if GMX_GPU_SYCL
     return sycl::fdim(one, two);
 #else
-    const float value = one - two;
-    return value >= 0.0F ? value : 0.0F;
+    // fmaxf returns 0 for NaN, like the comparison-based form, but is a single instruction
+    return fmaxf(one - two, 0.0F);
 #endif
 }
 
