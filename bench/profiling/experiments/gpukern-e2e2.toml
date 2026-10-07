@@ -1,0 +1,53 @@
+# THROWAWAY EXPERIMENT, round 2 (worktree gromacs-exp-gpukern): update-chain changes, the day-1
+# bonded-stream change as a runtime switch, and combinations with the NB rewrite (variant 13 = factored
+# force switch + Ewald Horner). XO = same worktree built with the day-1 OpenMP fix (-Xcompiler=-fopenmp).
+repeats = 5
+
+[builds]
+P = "~/.cache/gmxbench/builds/3bf7713a0dd56c41"
+X = "~/.cache/gmxbench/builds/9194ba626fe54212"
+XO = "~/.cache/gmxbench/builds/1093125cdb89aee7"
+
+[tprs]
+prod = "bench/results/profiling-2026-10-06/raw/inputs/prod/topol.tpr"
+
+[defaults]
+tpr = "prod"
+build = "X"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+nsteps = 25000
+resetstep = 5000
+
+[[variant]]
+name = "P"
+build = "P"
+[[variant]]
+name = "X-base"
+[[variant]]
+name = "settle-conc"
+env = { GMX_EXP_CONCURRENT_SETTLE = "1" }
+[[variant]]
+name = "settle-staged"
+env = { GMX_EXP_SETTLE_STAGED = "1" }
+[[variant]]
+name = "bonded-stream"
+env = { GMX_EXP_BONDED_STREAM = "1" }
+[[variant]]
+name = "nb3+settle-conc"
+env = { GMX_EXP_NB_VARIANT = "13", GMX_EXP_CONCURRENT_SETTLE = "1" }
+[[variant]]
+name = "nb3+settle-conc+bstream"
+env = { GMX_EXP_NB_VARIANT = "13", GMX_EXP_CONCURRENT_SETTLE = "1", GMX_EXP_BONDED_STREAM = "1" }
+[[variant]]
+name = "XO-all"
+build = "XO"
+env = { GMX_EXP_NB_VARIANT = "13", GMX_EXP_CONCURRENT_SETTLE = "1", GMX_EXP_BONDED_STREAM = "1" }
+[[variant]]
+name = "XO-all-t20"
+build = "XO"
+args = "-ntmpi 1 -ntomp 20 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+env = { GMX_EXP_NB_VARIANT = "13", GMX_EXP_CONCURRENT_SETTLE = "1", GMX_EXP_BONDED_STREAM = "1" }
+[[variant]]
+name = "P-t20"
+build = "P"
+args = "-ntmpi 1 -ntomp 20 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"

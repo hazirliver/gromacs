@@ -19,3 +19,12 @@ description = "cuda-nosub + -lineinfo, throwaway worktree with runtime-selectabl
 cuda_arch = "auto"
 cmake = ["-DCMAKE_BUILD_TYPE=Release", "-DGMX_GPU=CUDA", "-DGMX_BUILD_OWN_FFTW=ON", "-DGMXAPI=OFF",
          "-DGMX_INSTALL_NBLIB_API=OFF", "-DREGRESSIONTEST_DOWNLOAD=OFF", "-DCMAKE_CUDA_FLAGS=-lineinfo"]
+
+# Same worktree + the day-1 OpenMP fix for nvcc-compiled host code (-Xcompiler=-fopenmp), to measure
+# today's kernel changes stacked on both day-1 changes (bonded stream is the runtime switch
+# GMX_EXP_BONDED_STREAM in this worktree).
+[profiles.cuda-nosub-gpukern-omp]
+description = "cuda-nosub-gpukern + -Xcompiler=-fopenmp for CUDA host code (day-1 OpenMP fix)"
+cuda_arch = "auto"
+cmake = ["-DCMAKE_BUILD_TYPE=Release", "-DGMX_GPU=CUDA", "-DGMX_BUILD_OWN_FFTW=ON", "-DGMXAPI=OFF",
+         "-DGMX_INSTALL_NBLIB_API=OFF", "-DREGRESSIONTEST_DOWNLOAD=OFF", "-DCMAKE_CUDA_FLAGS=-lineinfo -Xcompiler=-fopenmp"]

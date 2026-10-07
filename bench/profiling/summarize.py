@@ -155,6 +155,12 @@ def collect(results: Path):
         rows.extend(json.loads(rp.read_text()))
     for i, r in enumerate(rows):
         r.setdefault("id", f"M{i + 1:04d}")
+        if str(r.get("experiment", "")).startswith("gpukern-") and not str(r.get("config", "")).startswith("P"):
+            gated = r.get("config") == "XO-all+staged-t20"
+            r["note"] = ((r.get("note") or "") + " THROWAWAY build outside src/ (worktree gromacs-exp-gpukern); "
+                         + ("gmxbench quality --strict passed (raw/gmxbench/quality-XO-final)" if gated
+                            else "quality gate run only for the full stacked configuration XO-all+staged-t20")).strip()
+            r["overhead"] = r.get("overhead", "") + "; throwaway"
         if str(r.get("experiment", "")).startswith("exp-"):
             gated = r.get("config") in ("ompcuda", "bondedstream", "combo", "combo-t20", "mb16-P", "P", "P-t20")
             r["note"] = ((r.get("note") or "") + " THROWAWAY build outside src/ (worktree gromacs-exp-nbminblocks); "

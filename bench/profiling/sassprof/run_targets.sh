@@ -8,7 +8,7 @@
 # match selects the plain-step variant of each kernel; 400-step window with two pair-list periods.
 # leap-frog cannot be collected (CUPTI reports no records although it is the first launch after enabling).
 set -u
-lib=$1; gmx=$2; tpr=$3; out=$4; shift 4
+lib=$(realpath "$1"); gmx=$(realpath "$2"); tpr=$(realpath "$3"); out=$(realpath -m "$4"); shift 4
 declare -A AFTER=(
   [nb_f]="bonded_kernel_gpuILb0ELb0E"
   [r2c]="nbnxn_kernel_ElecEw_VdwLJFsw_F_cuda"

@@ -1,0 +1,1565 @@
+diff --git a/src/gromacs/ewald/pme_gpu_internal.cpp b/src/gromacs/ewald/pme_gpu_internal.cpp
+index 148357dbbf..66c9dfdafc 100644
+--- a/src/gromacs/ewald/pme_gpu_internal.cpp
++++ b/src/gromacs/ewald/pme_gpu_internal.cpp
+@@ -45,6 +45,12 @@
+  */
+ 
+ #include "gmxpre.h"
++#include <cstdlib>
++#include <vector>
++#include <cstring>
++#include <cstdio>
++#include <cmath>
++#include <algorithm>
+ 
+ #include "pme_gpu_internal.h"
+ 
+@@ -1351,6 +1357,17 @@ static void pme_gpu_copy_common_data_from(const gmx_pme_t* pme)
+  */
+ static void pme_gpu_select_best_performing_pme_spreadgather_kernels(PmeGpu* pmeGpu)
+ {
++    /* THROWAWAY EXPERIMENT: GMX_EXP_SPREAD_INTERLEAVE assigns the atoms of a spread block to warps
++     * with a stride (warp w gets block atoms w, w+W, ...) instead of consecutively. */
++    pmeGpu->kernelParams->expSpreadInterleave = (std::getenv("GMX_EXP_SPREAD_INTERLEAVE") != nullptr) ? 1 : 0;
++    pmeGpu->kernelParams->expAtomPerm         = nullptr;
++    pmeGpu->kernelParams->expSpreadMode       = 0;
++    if (std::getenv("GMX_EXP_PME_ORDERSQ"))
++    {
++        pmeGpu->settings.threadsPerAtom     = ThreadsPerAtom::OrderSquared;
++        pmeGpu->settings.recalculateSplines = false;
++        return;
++    }
+     if (gmx::GpuConfigurationCapabilities::PmeSupportsThreadsPerAtomOrder
+         && pmeGpu->kernelParams->atoms.nAtoms > pmeGpu->minParticleCountToRecalculateSplines)
+     {
+@@ -1629,8 +1646,197 @@ static CommandEvent* pme_gpu_fetch_timing_event(const PmeGpu* pmeGpu, PmeStage p
+     return timingEvent;
+ }
+ 
++
++/* THROWAWAY EXPERIMENT: GMX_EXP_SPREAD_REPLAY=first:every:count:reps:file replays the spline+spread
++ * kernel on the live coordinates of selected calls, isolated (PME stream synchronised), into a scratch
++ * grid: production order, interleaved warps, atoms sorted by coarse spatial cell (permutation computed
++ * on the host from the current coordinates), and sorted + interleaved. Times with CUDA events and
++ * compares the grids with the production-order grid. */
++struct ExpSpreadReplay
++{
++    bool        enabled = false;
++    long        first = 0, every = 1, count = 0, reps = 20, calls = 0, done = 0;
++    std::string file;
++};
++
++static ExpSpreadReplay& expSpreadReplay()
++{
++    static ExpSpreadReplay r = []()
++    {
++        ExpSpreadReplay x;
++        if (const char* e = std::getenv("GMX_EXP_SPREAD_REPLAY"))
++        {
++            char buf[1024];
++            std::snprintf(buf, sizeof(buf), "%s", e);
++            char* save = nullptr;
++            char* tok  = strtok_r(buf, ":", &save);
++            long  v[4] = { 0, 1, 0, 20 };
++            for (int i = 0; i < 4 && tok; i++, tok = strtok_r(nullptr, ":", &save))
++            {
++                v[i] = std::atol(tok);
++            }
++            x.first   = v[0];
++            x.every   = std::max(1L, v[1]);
++            x.count   = v[2];
++            x.reps    = std::max(1L, v[3]);
++            x.file    = tok ? tok : "spread_replay.txt";
++            x.enabled = x.count > 0;
++        }
++        return x;
++    }();
++    return r;
++}
++
++static void expSpreadReplayRun(PmeGpu*                            pmeGpu,
++                               PmeGpuProgramImpl::PmeKernelHandle kernelPtr,
++                               const KernelLaunchConfig&          config,
++                               const PmeGpuKernelParams*          kp)
++{
++    auto&        r      = expSpreadReplay();
++    cudaStream_t stream = pmeGpu->archSpecific->pmeStream_.stream();
++    cudaStreamSynchronize(stream);
++    const int    nAtoms   = kp->atoms.nAtoms;
++    const size_t gridSize = pmeGpu->archSpecific->realGridSize[0];
++    float*       d_grid   = nullptr;
++    int*         d_perm   = nullptr;
++    cudaMalloc(&d_grid, gridSize * sizeof(float));
++    cudaMalloc(&d_perm, std::max(1, nAtoms) * sizeof(int));
++    // permutation: sort atoms by a coarse spatial cell (4 PME grid lines per cell in each dimension)
++    std::vector<float> hx(3 * size_t(nAtoms));
++    cudaMemcpy(hx.data(), kp->atoms.d_coordinates, hx.size() * sizeof(float), cudaMemcpyDeviceToHost);
++    const auto& rb = kp->current.recipBox;
++    int         nc[DIM];
++    for (int d = 0; d < DIM; d++)
++    {
++        nc[d] = std::max(1, kp->grid.realGridSize[d] / 4);
++    }
++    std::vector<std::pair<long, int>> keys(nAtoms);
++    for (int i = 0; i < nAtoms; i++)
++    {
++        long key = 0;
++        const float x = hx[3 * i], y = hx[3 * i + 1], z = hx[3 * i + 2];
++        const float frac[DIM] = { x * rb[XX][XX] + y * rb[XX][YY] + z * rb[XX][ZZ],
++                                  y * rb[YY][YY] + z * rb[YY][ZZ],
++                                  z * rb[ZZ][ZZ] };
++        for (int d = 0; d < DIM; d++)
++        {
++            float f = frac[d];
++            f -= std::floor(f);
++            const int c = std::min(nc[d] - 1, std::max(0, int(f * nc[d])));
++            key         = key * nc[d] + c;
++        }
++        keys[i] = { key, i };
++    }
++    std::stable_sort(keys.begin(), keys.end());
++    std::vector<int> perm(nAtoms);
++    for (int i = 0; i < nAtoms; i++)
++    {
++        perm[i] = keys[i].second;
++    }
++    cudaMemcpy(d_perm, perm.data(), nAtoms * sizeof(int), cudaMemcpyHostToDevice);
++
++    struct Variant
++    {
++        const char* name;
++        int         interleave;
++        const int*  perm;
++        int         mode;
++    };
++    const Variant variants[] = { { "prod-order", 0, nullptr, 0 },
++                                 { "prod-order-again", 0, nullptr, 0 },
++                                 { "interleave", 1, nullptr, 0 },
++                                 { "cell-sorted", 0, d_perm, 0 },
++                                 { "cell-sorted+interleave", 1, d_perm, 0 },
++                                 { "ko-splines-only", 0, nullptr, 1 },
++                                 { "ko-stores-not-atomics", 0, nullptr, 2 },
++                                 { "ko-stores-not-atomics+cell-sorted", 0, d_perm, 2 } };
++    const int     nv         = sizeof(variants) / sizeof(variants[0]);
++    std::vector<PmeGpuKernelParams> params(nv, *kp);
++    for (int v = 0; v < nv; v++)
++    {
++        params[v].expSpreadInterleave        = variants[v].interleave;
++        params[v].expAtomPerm                = variants[v].perm;
++        params[v].expSpreadMode              = variants[v].mode;
++        params[v].grid.d_realGrid[FEP_STATE_A] = d_grid;
++    }
++    const DeviceStream& ds = pmeGpu->archSpecific->pmeStream_;
++    std::vector<std::vector<float>> grids(nv, std::vector<float>(gridSize));
++    for (int v = 0; v < nv; v++)
++    {
++        cudaMemsetAsync(d_grid, 0, gridSize * sizeof(float), stream);
++        const auto args = prepareGpuKernelArguments(kernelPtr, config, &params[v]);
++        launchGpuKernel(kernelPtr, config, ds, nullptr, "PME spread exp", args);
++        cudaMemcpyAsync(grids[v].data(), d_grid, gridSize * sizeof(float), cudaMemcpyDeviceToHost, stream);
++        cudaStreamSynchronize(stream);
++    }
++    std::vector<cudaEvent_t> ev(2 * nv * r.reps);
++    for (auto& e : ev)
++    {
++        cudaEventCreate(&e);
++    }
++    for (long rep = 0; rep < r.reps; rep++)
++    {
++        for (int v = 0; v < nv; v++)
++        {
++            const auto args = prepareGpuKernelArguments(kernelPtr, config, &params[v]);
++            cudaEventRecord(ev[2 * (rep * nv + v)], stream);
++            launchGpuKernel(kernelPtr, config, ds, nullptr, "PME spread exp", args);
++            cudaEventRecord(ev[2 * (rep * nv + v) + 1], stream);
++        }
++    }
++    cudaStreamSynchronize(stream);
++    double refSq = 0;
++    for (size_t i = 0; i < gridSize; i++)
++    {
++        refSq += double(grids[0][i]) * grids[0][i];
++    }
++    if (FILE* fp = std::fopen(r.file.c_str(), "a"))
++    {
++        for (int v = 0; v < nv; v++)
++        {
++            std::vector<float> t;
++            for (long rep = 0; rep < r.reps; rep++)
++            {
++                float ms = 0;
++                cudaEventElapsedTime(&ms, ev[2 * (rep * nv + v)], ev[2 * (rep * nv + v) + 1]);
++                t.push_back(ms * 1000.0F);
++            }
++            std::sort(t.begin(), t.end());
++            double dSq = 0;
++            for (size_t i = 0; i < gridSize; i++)
++            {
++                const double d = double(grids[v][i]) - grids[0][i];
++                dSq += d * d;
++            }
++            std::fprintf(fp,
++                         "replay call=%ld variant=%s reps=%ld median_us=%.3f p10_us=%.3f p90_us=%.3f min_us=%.3f "
++                         "f_rel_rms=%.3e f_max_abs=0 natoms=%d grid=%zu\n",
++                         r.calls, variants[v].name, r.reps, t[t.size() / 2], t[t.size() / 10],
++                         t[(t.size() * 9) / 10], t[0], refSq > 0 ? std::sqrt(dSq / refSq) : 0.0, nAtoms, gridSize);
++        }
++        std::fclose(fp);
++    }
++    for (auto& e : ev)
++    {
++        cudaEventDestroy(e);
++    }
++    cudaFree(d_grid);
++    cudaFree(d_perm);
++}
++
++//! THROWAWAY EXPERIMENT: TIMING-ONLY kernel skips (wrong physics), cached per name
++static bool expPmeSkip(const char* name)
++{
++    return std::getenv(name) != nullptr;
++}
++
+ void pme_gpu_3dfft(const PmeGpu* pmeGpu, gmx_fft_direction dir, const int grid_index)
+ {
++    static const bool skipFft = expPmeSkip("GMX_EXP_SKIP_PME_FFT");
++    if (skipFft)
++    {
++        return;
++    }
+     PmeStage timerId = (dir == GMX_FFT_REAL_TO_COMPLEX) ? PmeStage::FftTransformR2C
+                                                         : PmeStage::FftTransformC2R;
+ 
+@@ -2129,12 +2335,28 @@ void pme_gpu_spread(PmeGpu*                        pmeGpu,
+                 }
+             }();
+ 
+-            launchGpuKernel(kernelPtr,
+-                            config,
+-                            pmeGpu->archSpecific->pmeStream_,
+-                            timingEvent,
+-                            "PME spline/spread",
+-                            kernelArgs);
++            static const bool skipSpread = expPmeSkip("GMX_EXP_SKIP_PME_SPREAD");
++            if (!skipSpread)
++            {
++                launchGpuKernel(kernelPtr,
++                                config,
++                                pmeGpu->archSpecific->pmeStream_,
++                                timingEvent,
++                                "PME spline/spread",
++                                kernelArgs);
++            }
++            {
++                auto& rep = expSpreadReplay();
++                if (rep.enabled && computeSplines && spreadCharges)
++                {
++                    rep.calls++;
++                    if (rep.calls >= rep.first && (rep.calls - rep.first) % rep.every == 0 && rep.done < rep.count)
++                    {
++                        expSpreadReplayRun(pmeGpu, kernelPtr, config, kernelParamsPtr);
++                        rep.done++;
++                    }
++                }
++            }
+ 
+             wallcycle_stop(wcycle, WallCycleCounter::LaunchGpuPme);
+         }
+@@ -2344,7 +2566,11 @@ void pme_gpu_solve(PmeGpu* pmeGpu, const int gridIndex, t_complex* h_grid, GridO
+         }
+     }();
+ 
+-    launchGpuKernel(kernelPtr, config, pmeGpu->archSpecific->pmeStream_, timingEvent, "PME solve", kernelArgs);
++    static const bool skipSolve = expPmeSkip("GMX_EXP_SKIP_PME_FFT");
++    if (!skipSolve)
++    {
++        launchGpuKernel(kernelPtr, config, pmeGpu->archSpecific->pmeStream_, timingEvent, "PME solve", kernelArgs);
++    }
+     pme_gpu_stop_timing(pmeGpu, timingId);
+ 
+     if (computeEnergyAndVirial)
+@@ -2594,8 +2820,12 @@ void pme_gpu_gather(PmeGpu*                       pmeGpu,
+             }
+         }();
+ 
+-        launchGpuKernel(
+-                kernelPtr, config, pmeGpu->archSpecific->pmeStream_, timingEvent, "PME gather", kernelArgs);
++        static const bool skipGather = expPmeSkip("GMX_EXP_SKIP_PME_GATHER");
++        if (!skipGather)
++        {
++            launchGpuKernel(
++                    kernelPtr, config, pmeGpu->archSpecific->pmeStream_, timingEvent, "PME gather", kernelArgs);
++        }
+         if (!computeVirial && pmeGpu->useNvshmem)
+         {
+             KernelLaunchConfig nvshmemConfig;
+diff --git a/src/gromacs/ewald/pme_gpu_types.h b/src/gromacs/ewald/pme_gpu_types.h
+index 20b36dbff3..2cc006f1cd 100644
+--- a/src/gromacs/ewald/pme_gpu_types.h
++++ b/src/gromacs/ewald/pme_gpu_types.h
+@@ -242,6 +242,12 @@ struct PmeGpuKernelParams
+     int pipelineAtomStart;
+     /*! \brief End atom for this stage of pipeline */
+     int pipelineAtomEnd;
++    /*! \brief THROWAWAY EXPERIMENT: spread with strided atom-to-warp assignment (GMX_EXP_SPREAD_INTERLEAVE) */
++    int expSpreadInterleave;
++    /*! \brief THROWAWAY EXPERIMENT: optional atom permutation for spread (slot -> atom), replay only */
++    HIDE_FROM_OPENCL_COMPILER(const int*) expAtomPerm;
++    /*! \brief THROWAWAY EXPERIMENT: spread knock-outs for the replay (0 normal, 1 splines only, 2 stores) */
++    int expSpreadMode;
+ 
+     /*! \brief PpRanksSendFInfo struct total size */
+     int ppRanksInfoSize;
+diff --git a/src/gromacs/ewald/pme_spread.cu b/src/gromacs/ewald/pme_spread.cu
+index fba5acadcb..40efb5995d 100644
+--- a/src/gromacs/ewald/pme_spread.cu
++++ b/src/gromacs/ewald/pme_spread.cu
+@@ -142,7 +142,15 @@ __device__ __forceinline__ void spread_charges(const PmeGpuKernelParams kernelPa
+                 const float thetaX = sm_theta[splineIndexX];
+                 GMX_DEVICE_ASSERT(isfinite(thetaX));
+                 GMX_DEVICE_ASSERT(isfinite(gm_grid[gridIndexGlobal]));
+-                atomicAdd(gm_grid + gridIndexGlobal, thetaX * Val);
++                if (kernelParams.expSpreadMode == 2)
++                {
++                    // THROWAWAY EXPERIMENT knock-out (TIMING ONLY): plain store instead of the atomic add
++                    gm_grid[gridIndexGlobal] = thetaX * Val;
++                }
++                else
++                {
++                    atomicAdd(gm_grid + gridIndexGlobal, thetaX * Val);
++                }
+             }
+         }
+     }
+@@ -198,8 +206,16 @@ __launch_bounds__(c_spreadMaxThreadsPerBlock) CLANG_DISABLE_OPTIMIZATION_ATTRIBU
+     const int atomWarpIndex = threadIdx.z % atomsPerWarp;
+     /* Atom index w.r.t. block/shared memory */
+     const int atomIndexLocal = warpIndex * atomsPerWarp + atomWarpIndex;
++    /* THROWAWAY EXPERIMENT: with expSpreadInterleave the thread's atom is taken with a stride of
++     * warpsPerBlock atoms, so the atoms of one warp are not consecutive in the input order (water O/H
++     * of one molecule then do not update the same grid points within one warp instruction). The
++     * spline/gridline shared-memory slots stay indexed by atomIndexLocal. */
++    constexpr int warpsPerBlock = atomsPerBlock / atomsPerWarp;
++    const int     atomSlot      = kernelParams.expSpreadInterleave
++                                          ? (atomWarpIndex * warpsPerBlock + warpIndex)
++                                          : atomIndexLocal;
+     /* Atom index w.r.t. global memory */
+-    const int atomIndexGlobal = atomIndexOffset + atomIndexLocal;
++    const int atomIndexGlobal = atomIndexOffset + atomSlot;
+ 
+     /* Early return for fully empty blocks at the end
+      * (should only happen for billions of input atoms)
+@@ -208,13 +224,22 @@ __launch_bounds__(c_spreadMaxThreadsPerBlock) CLANG_DISABLE_OPTIMIZATION_ATTRIBU
+     {
+         return;
+     }
++    /* THROWAWAY EXPERIMENT (spread replay only): slot -> atom permutation, data gathered directly */
++    const int* gm_expPerm = kernelParams.expAtomPerm;
++    const int  permAtom   = (gm_expPerm != nullptr && atomIndexGlobal < kernelParams.atoms.nAtoms)
++                                    ? gm_expPerm[atomIndexGlobal]
++                                    : -1;
+     /* Charges, required for both spline and spread */
+-    if constexpr (c_useAtomDataPrefetch)
++    if (gm_expPerm != nullptr)
++    {
++        atomCharge = (permAtom >= 0) ? kernelParams.atoms.d_coefficients[0][permAtom] : 0.0F;
++    }
++    else if constexpr (c_useAtomDataPrefetch)
+     {
+         pme_gpu_stage_atom_data<float, atomsPerBlock, 1>(
+                 sm_coefficients, &kernelParams.atoms.d_coefficients[0][kernelParams.pipelineAtomStart]);
+         __syncthreads();
+-        atomCharge = sm_coefficients[atomIndexLocal];
++        atomCharge = sm_coefficients[atomSlot];
+     }
+     else
+     {
+@@ -224,7 +249,11 @@ __launch_bounds__(c_spreadMaxThreadsPerBlock) CLANG_DISABLE_OPTIMIZATION_ATTRIBU
+     if constexpr (computeSplines)
+     {
+         const float3* __restrict__ gm_coordinates = asFloat3(kernelParams.atoms.d_coordinates);
+-        if constexpr (c_useAtomDataPrefetch)
++        if (gm_expPerm != nullptr)
++        {
++            atomX = (permAtom >= 0) ? gm_coordinates[permAtom] : make_float3(0.0F, 0.0F, 0.0F);
++        }
++        else if constexpr (c_useAtomDataPrefetch)
+         {
+             // Coordinates
+             __shared__ float3 sm_coordinates[atomsPerBlock];
+@@ -233,7 +262,7 @@ __launch_bounds__(c_spreadMaxThreadsPerBlock) CLANG_DISABLE_OPTIMIZATION_ATTRIBU
+             pme_gpu_stage_atom_data<float3, atomsPerBlock, 1>(
+                     sm_coordinates, gm_coordinates + kernelParams.pipelineAtomStart);
+             __syncthreads();
+-            atomX = sm_coordinates[atomIndexLocal];
++            atomX = sm_coordinates[atomSlot];
+         }
+         else
+         {
+@@ -261,7 +290,8 @@ __launch_bounds__(c_spreadMaxThreadsPerBlock) CLANG_DISABLE_OPTIMIZATION_ATTRIBU
+     /* Spreading */
+     if constexpr (spreadCharges)
+     {
+-        if (atomIndexGlobal < kernelParams.atoms.nAtoms
++        // THROWAWAY EXPERIMENT knock-out (TIMING ONLY): expSpreadMode 1 = splines only, no grid updates
++        if (atomIndexGlobal < kernelParams.atoms.nAtoms && kernelParams.expSpreadMode != 1
+             && (!kernelParams.usePipeline || (atomIndexGlobal < kernelParams.pipelineAtomEnd)))
+         {
+             spread_charges<order, wrapX, wrapY, 0, threadsPerAtom>(
+diff --git a/src/gromacs/listed_forces/listed_forces_gpu.h b/src/gromacs/listed_forces/listed_forces_gpu.h
+index ea781262fb..1f3f5ddc5e 100644
+--- a/src/gromacs/listed_forces/listed_forces_gpu.h
++++ b/src/gromacs/listed_forces/listed_forces_gpu.h
+@@ -197,6 +197,9 @@ public:
+     /*! \brief Launches the transfer of computed bonded energies.
+      */
+     void launchEnergyTransfer();
++    /*! \brief THROWAWAY EXPERIMENT: make the parent (NB local) stream wait for the bonded kernel,
++     * which runs in its own stream. Call after the local nonbonded work has been launched. */
++    void enqueueWaitForKernel();
+ 
+     /*! \brief Waits on the energy transfer, and accumulates bonded energies to \c enerd.
+      *
+diff --git a/src/gromacs/listed_forces/listed_forces_gpu_impl.h b/src/gromacs/listed_forces/listed_forces_gpu_impl.h
+index 050a0d4f47..a67aec2971 100644
+--- a/src/gromacs/listed_forces/listed_forces_gpu_impl.h
++++ b/src/gromacs/listed_forces/listed_forces_gpu_impl.h
+@@ -50,6 +50,10 @@
+ #include "config.h"
+ 
+ #include "gromacs/gpu_utils/gputraits.h"
++#include <memory>
++
++#include "gromacs/gpu_utils/device_stream.h"
++#include "gromacs/gpu_utils/gpueventsynchronizer.h"
+ #include "gromacs/gpu_utils/hostallocator.h"
+ #include "gromacs/listed_forces/listed_forces_gpu.h"
+ #include "gromacs/pbcutil/pbc_aiuc.h"
+@@ -167,6 +171,7 @@ public:
+     bool haveInteractions() const;
+     /*! \brief Launches the transfer of computed bonded energies. */
+     void launchEnergyTransfer();
++    void enqueueWaitForKernel();
+     /*! \brief Waits on the energy transfer, and accumulates bonded energies to \c enerd. */
+     void waitAccumulateEnergyTerms(gmx_enerdata_t* enerd);
+     /*! \brief Clears the device side energy buffer */
+@@ -201,6 +206,11 @@ private:
+     const DeviceContext& deviceContext_;
+     //! \brief Bonded GPU stream, not owned by this module
+     const DeviceStream& deviceStream_;
++    //! THROWAWAY EXPERIMENT: own stream for the bonded kernel, so it can overlap the NB kernel
++    std::unique_ptr<DeviceStream> bondedStream_;
++    GpuEventSynchronizer          parentReady_;
++    GpuEventSynchronizer          bondedDone_;
++    bool                          bondedDonePending_ = false;
+ 
+     //! Parameters, passed to the GPU kernel
+     BondedGpuKernelParameters kernelParams_;
+diff --git a/src/gromacs/listed_forces/listed_forces_gpu_impl_gpu.cpp b/src/gromacs/listed_forces/listed_forces_gpu_impl_gpu.cpp
+index d6e8afe93d..d11803dd93 100644
+--- a/src/gromacs/listed_forces/listed_forces_gpu_impl_gpu.cpp
++++ b/src/gromacs/listed_forces/listed_forces_gpu_impl_gpu.cpp
+@@ -45,6 +45,8 @@
+ 
+ #include "gmxpre.h"
+ 
++#include <cstdlib>
++
+ #include "gromacs/gpu_utils/device_context.h"
+ #include "gromacs/gpu_utils/device_stream.h"
+ #include "gromacs/gpu_utils/devicebuffer.h"
+@@ -106,6 +108,11 @@ ListedForcesGpu::Impl::Impl(const gmx_ffparams_t& ffparams,
+             "(calcVir=true)");
+ 
+     wcycle_ = wcycle;
++    // THROWAWAY EXPERIMENT: GMX_EXP_BONDED_STREAM=1 runs the bonded kernel in its own stream (runtime switch)
++    if (std::getenv("GMX_EXP_BONDED_STREAM") != nullptr)
++    {
++        bondedStream_ = std::make_unique<DeviceStream>(deviceContext_, DeviceStreamPriority::Normal, false);
++    }
+ 
+     allocateDeviceBuffer(&d_forceParams_, ffparams.numTypes(), deviceContext_);
+     // This could be an async transfer (if the source is pinned), so
+@@ -359,6 +366,20 @@ bool ListedForcesGpu::Impl::haveInteractions() const
+     return haveInteractions_;
+ }
+ 
++void ListedForcesGpu::Impl::enqueueWaitForKernel()
++{
++    if (bondedDonePending_)
++    {
++        bondedDone_.enqueueWaitEvent(deviceStream_);
++        bondedDonePending_ = false;
++    }
++}
++
++void ListedForcesGpu::enqueueWaitForKernel()
++{
++    impl_->enqueueWaitForKernel();
++}
++
+ void ListedForcesGpu::Impl::launchEnergyTransfer()
+ {
+     GMX_ASSERT(haveInteractions_,
+diff --git a/src/gromacs/listed_forces/listed_forces_gpu_internal.cu b/src/gromacs/listed_forces/listed_forces_gpu_internal.cu
+index fe5b140451..9e47665955 100644
+--- a/src/gromacs/listed_forces/listed_forces_gpu_internal.cu
++++ b/src/gromacs/listed_forces/listed_forces_gpu_internal.cu
+@@ -47,6 +47,8 @@
+ 
+ #include "gmxpre.h"
+ 
++#include <cstdlib>
++
+ #include <math_constants.h>
+ 
+ #include <cassert>
+@@ -283,12 +285,33 @@ void ListedForcesGpu::Impl::launchKernel()
+     const auto kernelArgs = prepareGpuKernelArguments(
+             kernelPtr, kernelLaunchConfig_, &kernelParams_, &kernelBuffers_, &d_xq_, &d_f_, &d_fShift_);
+ 
+-    launchGpuKernel(kernelPtr,
+-                    kernelLaunchConfig_,
+-                    deviceStream_,
+-                    nullptr,
+-                    "bonded_kernel_gpu<calcVir, calcEner>",
+-                    kernelArgs);
++    // THROWAWAY EXPERIMENT: GMX_EXP_SKIP_BONDED skips the bonded kernel (TIMING ONLY, wrong physics)
++    static const bool expSkipBonded = (std::getenv("GMX_EXP_SKIP_BONDED") != nullptr);
++    if (!expSkipBonded && bondedStream_)
++    {
++        // THROWAWAY EXPERIMENT (GMX_EXP_BONDED_STREAM, day-1 patch as a runtime switch): own stream after
++        // everything already queued in the parent (NB local) stream; the parent waits for completion only
++        // after the NB kernel has been launched (enqueueWaitForKernel()).
++        parentReady_.markEvent(deviceStream_);
++        parentReady_.enqueueWaitEvent(*bondedStream_);
++        launchGpuKernel(kernelPtr,
++                        kernelLaunchConfig_,
++                        *bondedStream_,
++                        nullptr,
++                        "bonded_kernel_gpu<calcVir, calcEner>",
++                        kernelArgs);
++        bondedDone_.markEvent(*bondedStream_);
++        bondedDonePending_ = true;
++    }
++    else if (!expSkipBonded)
++    {
++        launchGpuKernel(kernelPtr,
++                        kernelLaunchConfig_,
++                        deviceStream_,
++                        nullptr,
++                        "bonded_kernel_gpu<calcVir, calcEner>",
++                        kernelArgs);
++    }
+ 
+     wallcycle_sub_stop(wcycle_, WallCycleSubCounter::LaunchGpuBonded);
+     wallcycle_stop(wcycle_, WallCycleCounter::LaunchGpuPp);
+diff --git a/src/gromacs/mdlib/settle_gpu_internal.cu b/src/gromacs/mdlib/settle_gpu_internal.cu
+index e7af107b88..bdf2a127b4 100644
+--- a/src/gromacs/mdlib/settle_gpu_internal.cu
++++ b/src/gromacs/mdlib/settle_gpu_internal.cu
+@@ -42,6 +42,8 @@
+  */
+ #include "gmxpre.h"
+ 
++#include <cstdlib>
++
+ #include "settle_gpu_internal.h"
+ 
+ #include <cassert>
+@@ -363,6 +365,350 @@ __launch_bounds__(sc_maxThreadsPerBlock) __global__
+     }
+ }
+ 
++template<bool updateVelocities, bool computeVirial>
++__launch_bounds__(sc_maxThreadsPerBlock) __global__
++        void settleKernelStaged(const int numSettles,
++                          const WaterMolecule* __restrict__ gm_settles,
++                          const SettleParameters pars,
++                          const float3* __restrict__ gm_x,
++                          float3* __restrict__ gm_xprime,
++                          float invdt,
++                          float3* __restrict__ gm_v,
++                          float* __restrict__ gm_virialScaled,
++                          const PbcAiuc pbcAiuc)
++{
++    /* ******************************************************************* */
++    /*                                                                  ** */
++    /*    Original code by Shuichi Miyamoto, last update Oct. 1, 1992   ** */
++    /*                                                                  ** */
++    /*    Algorithm changes by Berk Hess:                               ** */
++    /*    2004-07-15 Convert COM to double precision to avoid drift     ** */
++    /*    2006-10-16 Changed velocity update to use differences         ** */
++    /*    2012-09-24 Use oxygen as reference instead of COM             ** */
++    /*    2016-02    Complete rewrite of the code for SIMD              ** */
++    /*    2020-06    Completely remove use of COM to minimize drift     ** */
++    /*                                                                  ** */
++    /*    Reference for the SETTLE algorithm                            ** */
++    /*           S. Miyamoto et al., J. Comp. Chem., 13, 952 (1992).    ** */
++    /*                                                                  ** */
++    /* ******************************************************************* */
++
++    constexpr float almost_zero = real(1e-12);
++
++    extern __shared__ float sm_threadVirial[];
++
++    int tid = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
++
++    // THROWAWAY EXPERIMENT (GMX_EXP_SETTLE_STAGED): when the block's waters are consecutive atoms
++    // (O,H,H,O,H,H,...), x, x' and v of the whole block are moved through shared memory with
++    // coalesced loads/stores instead of three float3 gathers per array and thread (36-byte stride).
++    __shared__ float sm_xs[9 * sc_threadsPerBlock];
++    __shared__ float sm_xps[9 * sc_threadsPerBlock];
++    __shared__ float sm_vs[updateVelocities ? 9 * sc_threadsPerBlock : 1];
++    const int  blockFirstSettle = static_cast<int>(blockIdx.x * blockDim.x);
++    const int  numInBlock       = min(static_cast<int>(blockDim.x), numSettles - blockFirstSettle);
++    const int  blockFirstAtom   = gm_settles[blockFirstSettle].ow1;
++    bool       isContiguous     = true;
++    if (tid < numSettles)
++    {
++        const WaterMolecule w = gm_settles[tid];
++        isContiguous = (w.ow1 == blockFirstAtom + 3 * static_cast<int>(threadIdx.x)) && (w.hw2 == w.ow1 + 1)
++                       && (w.hw3 == w.ow1 + 2);
++    }
++    const bool   staged    = __syncthreads_and(isContiguous);
++    const float* gm_xf     = reinterpret_cast<const float*>(gm_x) + 3 * blockFirstAtom;
++    float*       gm_xpf    = reinterpret_cast<float*>(gm_xprime) + 3 * blockFirstAtom;
++    float*       gm_vf     = reinterpret_cast<float*>(gm_v) + 3 * blockFirstAtom;
++    const int    numFloats = 9 * numInBlock;
++    const int    sb        = 9 * static_cast<int>(threadIdx.x);
++    if (staged)
++    {
++        for (int k = threadIdx.x; k < numFloats; k += blockDim.x)
++        {
++            sm_xs[k]  = gm_xf[k];
++            sm_xps[k] = gm_xpf[k];
++            if constexpr (updateVelocities)
++            {
++                sm_vs[k] = gm_vf[k];
++            }
++        }
++        __syncthreads();
++    }
++
++    if (tid < numSettles)
++    {
++        // These are the indexes of three atoms in a single 'water' molecule.
++        // TODO Can be reduced to one integer if atoms are consecutive in memory.
++        WaterMolecule indices = gm_settles[tid];
++
++        float3 x_ow1 = staged ? make_float3(sm_xs[sb + 0], sm_xs[sb + 1], sm_xs[sb + 2]) : gm_x[indices.ow1];
++        float3 x_hw2 = staged ? make_float3(sm_xs[sb + 3], sm_xs[sb + 4], sm_xs[sb + 5]) : gm_x[indices.hw2];
++        float3 x_hw3 = staged ? make_float3(sm_xs[sb + 6], sm_xs[sb + 7], sm_xs[sb + 8]) : gm_x[indices.hw3];
++
++        float3 xprime_ow1 =
++                staged ? make_float3(sm_xps[sb + 0], sm_xps[sb + 1], sm_xps[sb + 2]) : gm_xprime[indices.ow1];
++        float3 xprime_hw2 =
++                staged ? make_float3(sm_xps[sb + 3], sm_xps[sb + 4], sm_xps[sb + 5]) : gm_xprime[indices.hw2];
++        float3 xprime_hw3 =
++                staged ? make_float3(sm_xps[sb + 6], sm_xps[sb + 7], sm_xps[sb + 8]) : gm_xprime[indices.hw3];
++
++        float3 dist21 = pbcDxAiuc(pbcAiuc, x_hw2, x_ow1);
++        float3 dist31 = pbcDxAiuc(pbcAiuc, x_hw3, x_ow1);
++        float3 doh2   = pbcDxAiuc(pbcAiuc, xprime_hw2, xprime_ow1);
++
++        float3 doh3 = pbcDxAiuc(pbcAiuc, xprime_hw3, xprime_ow1);
++
++        float3 a1 = (-doh2 - doh3) * pars.wh;
++
++        float3 b1 = doh2 + a1;
++
++        float3 c1 = doh3 + a1;
++
++        float xakszd = dist21.y * dist31.z - dist21.z * dist31.y;
++        float yakszd = dist21.z * dist31.x - dist21.x * dist31.z;
++        float zakszd = dist21.x * dist31.y - dist21.y * dist31.x;
++
++        float xaksxd = a1.y * zakszd - a1.z * yakszd;
++        float yaksxd = a1.z * xakszd - a1.x * zakszd;
++        float zaksxd = a1.x * yakszd - a1.y * xakszd;
++
++        float xaksyd = yakszd * zaksxd - zakszd * yaksxd;
++        float yaksyd = zakszd * xaksxd - xakszd * zaksxd;
++        float zaksyd = xakszd * yaksxd - yakszd * xaksxd;
++
++        float axlng = rsqrt(xaksxd * xaksxd + yaksxd * yaksxd + zaksxd * zaksxd);
++        float aylng = rsqrt(xaksyd * xaksyd + yaksyd * yaksyd + zaksyd * zaksyd);
++        float azlng = rsqrt(xakszd * xakszd + yakszd * yakszd + zakszd * zakszd);
++
++        // TODO {1,2,3} indexes should be swapped with {.x, .y, .z} components.
++        //      This way, we will be able to use vector ops more.
++        float3 trns1, trns2, trns3;
++
++        trns1.x = xaksxd * axlng;
++        trns2.x = yaksxd * axlng;
++        trns3.x = zaksxd * axlng;
++
++        trns1.y = xaksyd * aylng;
++        trns2.y = yaksyd * aylng;
++        trns3.y = zaksyd * aylng;
++
++        trns1.z = xakszd * azlng;
++        trns2.z = yakszd * azlng;
++        trns3.z = zakszd * azlng;
++
++
++        float2 b0d, c0d;
++
++        b0d.x = trns1.x * dist21.x + trns2.x * dist21.y + trns3.x * dist21.z;
++        b0d.y = trns1.y * dist21.x + trns2.y * dist21.y + trns3.y * dist21.z;
++
++        c0d.x = trns1.x * dist31.x + trns2.x * dist31.y + trns3.x * dist31.z;
++        c0d.y = trns1.y * dist31.x + trns2.y * dist31.y + trns3.y * dist31.z;
++
++        float3 b1d, c1d;
++
++        float a1d_z = trns1.z * a1.x + trns2.z * a1.y + trns3.z * a1.z;
++
++        b1d.x = trns1.x * b1.x + trns2.x * b1.y + trns3.x * b1.z;
++        b1d.y = trns1.y * b1.x + trns2.y * b1.y + trns3.y * b1.z;
++        b1d.z = trns1.z * b1.x + trns2.z * b1.y + trns3.z * b1.z;
++
++        c1d.x = trns1.x * c1.x + trns2.x * c1.y + trns3.x * c1.z;
++        c1d.y = trns1.y * c1.x + trns2.y * c1.y + trns3.y * c1.z;
++        c1d.z = trns1.z * c1.x + trns2.z * c1.y + trns3.z * c1.z;
++
++
++        float sinphi = a1d_z * rsqrt(pars.ra * pars.ra);
++        float tmp2   = 1.0F - sinphi * sinphi;
++
++        if (almost_zero > tmp2)
++        {
++            tmp2 = almost_zero;
++        }
++
++        float tmp    = rsqrt(tmp2);
++        float cosphi = tmp2 * tmp;
++        float sinpsi = (b1d.z - c1d.z) * pars.irc2 * tmp;
++        tmp2         = 1.0F - sinpsi * sinpsi;
++
++        float cospsi = tmp2 * rsqrt(tmp2);
++
++        float a2d_y = pars.ra * cosphi;
++        float b2d_x = -pars.rc * cospsi;
++        float t1    = -pars.rb * cosphi;
++        float t2    = pars.rc * sinpsi * sinphi;
++        float b2d_y = t1 - t2;
++        float c2d_y = t1 + t2;
++
++        /*     --- Step3  al,be,ga            --- */
++        float alpha  = b2d_x * (b0d.x - c0d.x) + b0d.y * b2d_y + c0d.y * c2d_y;
++        float beta   = b2d_x * (c0d.y - b0d.y) + b0d.x * b2d_y + c0d.x * c2d_y;
++        float gamma  = b0d.x * b1d.y - b1d.x * b0d.y + c0d.x * c1d.y - c1d.x * c0d.y;
++        float al2be2 = alpha * alpha + beta * beta;
++        tmp2         = (al2be2 - gamma * gamma);
++        float sinthe = (alpha * gamma - beta * tmp2 * rsqrt(tmp2)) * rsqrt(al2be2 * al2be2);
++
++        /*  --- Step4  A3' --- */
++        tmp2         = 1.0F - sinthe * sinthe;
++        float costhe = tmp2 * rsqrt(tmp2);
++
++        float3 a3d, b3d, c3d;
++
++        a3d.x = -a2d_y * sinthe;
++        a3d.y = a2d_y * costhe;
++        a3d.z = a1d_z;
++        b3d.x = b2d_x * costhe - b2d_y * sinthe;
++        b3d.y = b2d_x * sinthe + b2d_y * costhe;
++        b3d.z = b1d.z;
++        c3d.x = -b2d_x * costhe - c2d_y * sinthe;
++        c3d.y = -b2d_x * sinthe + c2d_y * costhe;
++        c3d.z = c1d.z;
++
++        /*    --- Step5  A3 --- */
++        float3 a3, b3, c3;
++
++        a3.x = trns1.x * a3d.x + trns1.y * a3d.y + trns1.z * a3d.z;
++        a3.y = trns2.x * a3d.x + trns2.y * a3d.y + trns2.z * a3d.z;
++        a3.z = trns3.x * a3d.x + trns3.y * a3d.y + trns3.z * a3d.z;
++
++        b3.x = trns1.x * b3d.x + trns1.y * b3d.y + trns1.z * b3d.z;
++        b3.y = trns2.x * b3d.x + trns2.y * b3d.y + trns2.z * b3d.z;
++        b3.z = trns3.x * b3d.x + trns3.y * b3d.y + trns3.z * b3d.z;
++
++        c3.x = trns1.x * c3d.x + trns1.y * c3d.y + trns1.z * c3d.z;
++        c3.y = trns2.x * c3d.x + trns2.y * c3d.y + trns2.z * c3d.z;
++        c3.z = trns3.x * c3d.x + trns3.y * c3d.y + trns3.z * c3d.z;
++
++
++        /* Compute and store the corrected new coordinate */
++        const float3 dxOw1 = a3 - a1;
++        const float3 dxHw2 = b3 - b1;
++        const float3 dxHw3 = c3 - c1;
++
++        if (staged)
++        {
++            const float3 a = xprime_ow1 + dxOw1, b = xprime_hw2 + dxHw2, c = xprime_hw3 + dxHw3;
++            sm_xps[sb + 0] = a.x; sm_xps[sb + 1] = a.y; sm_xps[sb + 2] = a.z;
++            sm_xps[sb + 3] = b.x; sm_xps[sb + 4] = b.y; sm_xps[sb + 5] = b.z;
++            sm_xps[sb + 6] = c.x; sm_xps[sb + 7] = c.y; sm_xps[sb + 8] = c.z;
++        }
++        else
++        {
++            gm_xprime[indices.ow1] = xprime_ow1 + dxOw1;
++            gm_xprime[indices.hw2] = xprime_hw2 + dxHw2;
++            gm_xprime[indices.hw3] = xprime_hw3 + dxHw3;
++        }
++
++        if constexpr (updateVelocities)
++        {
++            float3 v_ow1 = staged ? make_float3(sm_vs[sb + 0], sm_vs[sb + 1], sm_vs[sb + 2]) : gm_v[indices.ow1];
++            float3 v_hw2 = staged ? make_float3(sm_vs[sb + 3], sm_vs[sb + 4], sm_vs[sb + 5]) : gm_v[indices.hw2];
++            float3 v_hw3 = staged ? make_float3(sm_vs[sb + 6], sm_vs[sb + 7], sm_vs[sb + 8]) : gm_v[indices.hw3];
++
++            /* Add the position correction divided by dt to the velocity */
++            v_ow1 = dxOw1 * invdt + v_ow1;
++            v_hw2 = dxHw2 * invdt + v_hw2;
++            v_hw3 = dxHw3 * invdt + v_hw3;
++
++            if (staged)
++            {
++                sm_vs[sb + 0] = v_ow1.x; sm_vs[sb + 1] = v_ow1.y; sm_vs[sb + 2] = v_ow1.z;
++                sm_vs[sb + 3] = v_hw2.x; sm_vs[sb + 4] = v_hw2.y; sm_vs[sb + 5] = v_hw2.z;
++                sm_vs[sb + 6] = v_hw3.x; sm_vs[sb + 7] = v_hw3.y; sm_vs[sb + 8] = v_hw3.z;
++            }
++            else
++            {
++                gm_v[indices.ow1] = v_ow1;
++                gm_v[indices.hw2] = v_hw2;
++                gm_v[indices.hw3] = v_hw3;
++            }
++        }
++
++        if constexpr (computeVirial)
++        {
++            float3 mdb = pars.mH * dxHw2;
++            float3 mdc = pars.mH * dxHw3;
++            float3 mdo = pars.mO * dxOw1 + mdb + mdc;
++
++            sm_threadVirial[0 * blockDim.x + threadIdx.x] =
++                    -(x_ow1.x * mdo.x + dist21.x * mdb.x + dist31.x * mdc.x);
++            sm_threadVirial[1 * blockDim.x + threadIdx.x] =
++                    -(x_ow1.x * mdo.y + dist21.x * mdb.y + dist31.x * mdc.y);
++            sm_threadVirial[2 * blockDim.x + threadIdx.x] =
++                    -(x_ow1.x * mdo.z + dist21.x * mdb.z + dist31.x * mdc.z);
++            sm_threadVirial[3 * blockDim.x + threadIdx.x] =
++                    -(x_ow1.y * mdo.y + dist21.y * mdb.y + dist31.y * mdc.y);
++            sm_threadVirial[4 * blockDim.x + threadIdx.x] =
++                    -(x_ow1.y * mdo.z + dist21.y * mdb.z + dist31.y * mdc.z);
++            sm_threadVirial[5 * blockDim.x + threadIdx.x] =
++                    -(x_ow1.z * mdo.z + dist21.z * mdb.z + dist31.z * mdc.z);
++        }
++    }
++    else
++    {
++        // Filling data for dummy threads with zeroes
++        if constexpr (computeVirial)
++        {
++            for (int d = 0; d < 6; d++)
++            {
++                sm_threadVirial[d * blockDim.x + threadIdx.x] = 0.0F;
++            }
++        }
++    }
++    if (staged)
++    {
++        __syncthreads();
++        for (int k = threadIdx.x; k < numFloats; k += blockDim.x)
++        {
++            gm_xpf[k] = sm_xps[k];
++            if constexpr (updateVelocities)
++            {
++                gm_vf[k] = sm_vs[k];
++            }
++        }
++    }
++    // Basic reduction for the values inside single thread block
++    // TODO what follows should be separated out as a standard virial reduction subroutine
++    if constexpr (computeVirial)
++    {
++        // This is to ensure that all threads saved the data before reduction starts
++        __syncthreads();
++        // This casts unsigned into signed integers to avoid clang warnings
++        int tib       = static_cast<int>(threadIdx.x);
++        int blockSize = static_cast<int>(blockDim.x);
++        // Reduce up to one virial per thread block
++        // All blocks are divided by half, the first half of threads sums
++        // two virials. Then the first half is divided by two and the first half
++        // of it sums two values... The procedure continues until only one thread left.
++        // Only works if the threads per blocks is a power of two.
++        for (int divideBy = 2; divideBy <= blockSize; divideBy *= 2)
++        {
++            int dividedAt = blockSize / divideBy;
++            if (tib < dividedAt)
++            {
++                for (int d = 0; d < 6; d++)
++                {
++                    sm_threadVirial[d * blockSize + tib] +=
++                            sm_threadVirial[d * blockSize + (tib + dividedAt)];
++                }
++            }
++            if (dividedAt > warpSize / 2)
++            {
++                __syncthreads();
++            }
++            else
++            {
++                __syncwarp();
++            }
++        }
++        // First 6 threads in the block add the 6 components of virial to the global memory address
++        if (tib < 6)
++        {
++            atomicAdd(&(gm_virialScaled[tib]), sm_threadVirial[tib * blockSize]);
++        }
++    }
++}
++
+ void launchSettleGpuKernel(const int                          numSettles,
+                            const DeviceBuffer<WaterMolecule>& d_atomIds,
+                            const SettleParameters&            settleParameters,
+@@ -401,7 +747,9 @@ void launchSettleGpuKernel(const int                          numSettles,
+                     config.sharedMemorySize = 0;
+                 }
+ 
+-                auto kernelPtr = settleKernel<updateVelocities_, computeVirial_>;
++                static const bool expStaged = (std::getenv("GMX_EXP_SETTLE_STAGED") != nullptr);
++                auto kernelPtr = expStaged ? settleKernelStaged<updateVelocities_, computeVirial_>
++                                           : settleKernel<updateVelocities_, computeVirial_>;
+ 
+                 const auto kernelArgs = prepareGpuKernelArguments(kernelPtr,
+                                                                   config,
+diff --git a/src/gromacs/mdlib/sim_util.cpp b/src/gromacs/mdlib/sim_util.cpp
+index c9b4a71dff..7a1e4c083f 100644
+--- a/src/gromacs/mdlib/sim_util.cpp
++++ b/src/gromacs/mdlib/sim_util.cpp
+@@ -1835,6 +1835,11 @@ void do_force(FILE*                         fplog,
+         wallcycle_start_nocount(wcycle, WallCycleCounter::LaunchGpuPp);
+         wallcycle_sub_start_nocount(wcycle, WallCycleSubCounter::LaunchGpuNonBonded);
+         do_nb_verlet(fr, ic, enerd, stepWork, InteractionLocality::Local, enbvClearFNo, step, nrnb, wcycle);
++        // THROWAWAY EXPERIMENT: the bonded kernel runs in its own stream; join it here
++        if (domainWork.haveGpuBondedWork && !simulationWork.havePpDomainDecomposition)
++        {
++            fr->listedForcesGpu->enqueueWaitForKernel();
++        }
+         /* launch local nonbonded free energy work on GPU */
+         if (domainWork.haveGpuNonbondedFreeEnergyWork && stepWork.computeNonbondedForces)
+         {
+diff --git a/src/gromacs/mdlib/update_constrain_gpu_impl.cpp b/src/gromacs/mdlib/update_constrain_gpu_impl.cpp
+index a32f8d116c..3a38480269 100644
+--- a/src/gromacs/mdlib/update_constrain_gpu_impl.cpp
++++ b/src/gromacs/mdlib/update_constrain_gpu_impl.cpp
+@@ -51,6 +51,7 @@
+ #include <cassert>
+ #include <cmath>
+ #include <cstdio>
++#include <cstdlib>
+ 
+ #include <algorithm>
+ 
+@@ -99,8 +100,18 @@ void UpdateConstrainGpu::Impl::integrate(GpuEventSynchronizer*             fRead
+                 d_x_, d_x0_, d_v_, d_f_, dt, doTemperatureScaling, tcstat, doParrinelloRahman, dtPressureCouple, prVelocityScalingMatrix);
+         if constexpr (GpuConfigurationCapabilities::Update)
+         {
++            if (expConcurrentSettle_)
++            {
++                expForkEvent_.markEvent(deviceStream_);
++                expForkEvent_.enqueueWaitEvent(*expSettleStream_);
++            }
+             lincsGpu_->apply(d_x0_, d_x_, updateVelocities, d_v_, 1.0 / dt, computeVirial, virial, pbcAiuc_);
+             settleGpu_->apply(d_x0_, d_x_, updateVelocities, d_v_, 1.0 / dt, computeVirial, virial, pbcAiuc_);
++            if (expConcurrentSettle_)
++            {
++                expJoinEvent_.markEvent(*expSettleStream_);
++                expJoinEvent_.enqueueWaitEvent(deviceStream_);
++            }
+         }
+ 
+         // scaledVirial -> virial (methods above returns scaled values)
+@@ -168,12 +179,21 @@ UpdateConstrainGpu::Impl::Impl(const t_inputrec&    ir,
+     if constexpr (GpuConfigurationCapabilities::Update)
+     {
+         lincsGpu_ = std::make_unique<LincsGpu>(ir.nLincsIter, ir.nProjOrder, deviceContext_, deviceStream_);
+-        settleGpu_ = std::make_unique<SettleGpu>(mtop, deviceContext_, deviceStream_);
++        expConcurrentSettle_ = (std::getenv("GMX_EXP_CONCURRENT_SETTLE") != nullptr);
++        if (expConcurrentSettle_)
++        {
++            expSettleStream_ = std::make_unique<DeviceStream>(deviceContext_, DeviceStreamPriority::High, false);
++        }
++        settleGpu_ = std::make_unique<SettleGpu>(
++                mtop, deviceContext_, expConcurrentSettle_ ? *expSettleStream_ : deviceStream_);
+     }
+ }
+ 
+ UpdateConstrainGpu::Impl::~Impl()
+ {
++    // THROWAWAY EXPERIMENT: SettleGpu refers to expSettleStream_, which is declared (and so destroyed)
++    // after it; release SETTLE first.
++    settleGpu_.reset();
+     try
+     {
+         freeDeviceBuffer(&d_x0_);
+diff --git a/src/gromacs/mdlib/update_constrain_gpu_impl.h b/src/gromacs/mdlib/update_constrain_gpu_impl.h
+index 34223504d0..c6c01cdbc9 100644
+--- a/src/gromacs/mdlib/update_constrain_gpu_impl.h
++++ b/src/gromacs/mdlib/update_constrain_gpu_impl.h
+@@ -219,6 +219,14 @@ private:
+ 
+     //! The event to indicate when the update of coordinates is complete
+     GpuEventSynchronizer xUpdatedOnDeviceEvent_;
++    //! THROWAWAY EXPERIMENT (GMX_EXP_CONCURRENT_SETTLE): SETTLE in its own stream, concurrent with LINCS
++    bool expConcurrentSettle_ = false;
++    //! Stream for SETTLE when concurrent
++    std::unique_ptr<DeviceStream> expSettleStream_;
++    //! Fork (leap-frog done) and join (SETTLE done) events
++    GpuEventSynchronizer expForkEvent_;
++    //! Join event
++    GpuEventSynchronizer expJoinEvent_;
+     //! The wallclock counter
+     gmx_wallcycle* wcycle_ = nullptr;
+ };
+diff --git a/src/gromacs/nbnxm/cuda/CMakeLists.txt b/src/gromacs/nbnxm/cuda/CMakeLists.txt
+index 8ac95972d6..92160adf94 100644
+--- a/src/gromacs/nbnxm/cuda/CMakeLists.txt
++++ b/src/gromacs/nbnxm/cuda/CMakeLists.txt
+@@ -41,7 +41,8 @@ if(GMX_GPU_CUDA)
+             nbfe_cuda_kernel_F.cu
+             nbfe_cuda_kernel_VF.cu
+             nbfe_foreign_cuda_kernel_V.cu
+-            nbnxm_cuda_kernel_pruneonly.cu)
++            nbnxm_cuda_kernel_pruneonly.cu
++            nbnxm_cuda_kernel_exp.cu)
+     endif()
+ 
+     file(GLOB NBNXM_CUDA_SOURCES
+diff --git a/src/gromacs/nbnxm/cuda/nbnxm_cuda.cu b/src/gromacs/nbnxm/cuda/nbnxm_cuda.cu
+index b0e8f0bc00..b63ae0c739 100644
+--- a/src/gromacs/nbnxm/cuda/nbnxm_cuda.cu
++++ b/src/gromacs/nbnxm/cuda/nbnxm_cuda.cu
+@@ -40,8 +40,14 @@
+ 
+ #include "config.h"
+ 
++#include <algorithm>
+ #include <cassert>
++#include <cmath>
++#include <cstdio>
+ #include <cstdlib>
++#include <cstring>
++#include <string>
++#include <vector>
+ 
+ #include <cub/device/device_scan.cuh>
+ 
+@@ -125,6 +131,11 @@ namespace gmx
+ /*! Nonbonded kernel function pointer type */
+ typedef void (*nbnxn_cu_kfunc_ptr_t)(const NBAtomDataGpu, const NBParamGpu, const GpuPairlist, bool);
+ 
++/* THROWAWAY EXPERIMENT (gromacs-exp-gpukern): kernel variants from nbnxm_cuda_kernel_exp.cu */
++extern const nbnxn_cu_kfunc_ptr_t gmxExpNbVariants[];
++extern const char* const          gmxExpNbVariantNames[];
++extern const int                  gmxExpNbNumVariants;
++
+ /*********************************/
+ 
+ /*! Returns the number of blocks to be used for the nonbonded GPU kernel. */
+@@ -513,6 +524,163 @@ static inline void gpuLaunchKernelSciSort(GpuPairlist* plist, const DeviceStream
+    the local x+q H2D (and all preceding) tasks are complete and synchronize
+    with this event in the non-local stream before launching the non-bonded kernel.
+  */
++/* THROWAWAY EXPERIMENT: GMX_EXP_NB_VARIANT=k launches variant k instead of the production
++ * ElecEw_VdwLJFsw force-only kernel; GMX_EXP_NB_REPLAY=first:every:count:reps:file replays the
++ * force-only kernel (production + all variants) on the live data of selected calls, isolated
++ * (stream synchronised before), into a scratch force buffer, timing each launch with CUDA events
++ * and comparing the forces with those of the production kernel. */
++static int expNbVariant()
++{
++    static const int v = std::getenv("GMX_EXP_NB_VARIANT") ? std::atoi(std::getenv("GMX_EXP_NB_VARIANT")) : -1;
++    return v;
++}
++
++struct ExpNbReplay
++{
++    bool        enabled = false;
++    long        first = 0, every = 1, count = 0, reps = 20;
++    std::string file;
++    long        calls = 0, done = 0;
++    float3*     d_scratch = nullptr;
++    int         nAlloc    = 0;
++};
++
++static ExpNbReplay& expNbReplay()
++{
++    static ExpNbReplay r = []()
++    {
++        ExpNbReplay x;
++        if (const char* e = std::getenv("GMX_EXP_NB_REPLAY"))
++        {
++            char buf[1024];
++            std::snprintf(buf, sizeof(buf), "%s", e);
++            char* save = nullptr;
++            char* tok  = strtok_r(buf, ":", &save);
++            long  v[4] = { 0, 1, 0, 20 };
++            for (int i = 0; i < 4 && tok; i++, tok = strtok_r(nullptr, ":", &save))
++            {
++                v[i] = std::atol(tok);
++            }
++            x.first   = v[0];
++            x.every   = std::max(1L, v[1]);
++            x.count   = v[2];
++            x.reps    = std::max(1L, v[3]);
++            x.file    = tok ? tok : "nb_replay.txt";
++            x.enabled = x.count > 0;
++        }
++        return x;
++    }();
++    return r;
++}
++
++static void expNbReplayRun(ExpNbReplay&               r,
++                           nbnxn_cu_kfunc_ptr_t       prodKernel,
++                           const KernelLaunchConfig&  config,
++                           NBAtomDataGpu*             adat,
++                           NBParamGpu*                nbp,
++                           GpuPairlist*               plist,
++                           const DeviceStream&        deviceStream)
++{
++    cudaStream_t stream = deviceStream.stream();
++    cudaStreamSynchronize(stream);
++    if (r.nAlloc < adat->numAtomsAlloc)
++    {
++        if (r.d_scratch)
++        {
++            cudaFree(r.d_scratch);
++        }
++        cudaMalloc(&r.d_scratch, adat->numAtomsAlloc * sizeof(float3));
++        r.nAlloc = adat->numAtomsAlloc;
++        for (int v = 0; v < gmxExpNbNumVariants; v++)
++        {
++            cudaFuncSetCacheConfig(gmxExpNbVariants[v], cudaFuncCachePreferEqual);
++        }
++    }
++    std::vector<nbnxn_cu_kfunc_ptr_t> kernels = { prodKernel, prodKernel };
++    std::vector<std::string>          names   = { "prod", "prod-again" };
++    for (int v = 0; v < gmxExpNbNumVariants; v++)
++    {
++        kernels.push_back(gmxExpNbVariants[v]);
++        names.push_back(gmxExpNbVariantNames[v]);
++    }
++    NBAtomDataGpu scratchAdat = *adat;
++    scratchAdat.f             = reinterpret_cast<Float3*>(r.d_scratch);
++    bool          noFshift    = false;
++    const int     n           = adat->numAtoms;
++    const size_t  bytes       = size_t(n) * sizeof(float3);
++    std::vector<std::vector<float3>> forces(kernels.size(), std::vector<float3>(n));
++    // correctness: one launch each into a zeroed buffer
++    for (size_t k = 0; k < kernels.size(); k++)
++    {
++        cudaMemsetAsync(r.d_scratch, 0, bytes, stream);
++        const auto args = prepareGpuKernelArguments(kernels[k], config, &scratchAdat, nbp, plist, &noFshift);
++        launchGpuKernel(kernels[k], config, deviceStream, nullptr, "k_calc_nb_exp", args);
++        cudaMemcpyAsync(forces[k].data(), r.d_scratch, bytes, cudaMemcpyDeviceToHost, stream);
++        cudaStreamSynchronize(stream);
++    }
++    // timing: interleaved rounds
++    const size_t      nk = kernels.size();
++    std::vector<cudaEvent_t> ev(2 * nk * r.reps);
++    for (auto& e : ev)
++    {
++        cudaEventCreate(&e);
++    }
++    for (long rep = 0; rep < r.reps; rep++)
++    {
++        for (size_t k = 0; k < nk; k++)
++        {
++            const auto args = prepareGpuKernelArguments(kernels[k], config, &scratchAdat, nbp, plist, &noFshift);
++            cudaEventRecord(ev[2 * (rep * nk + k)], stream);
++            launchGpuKernel(kernels[k], config, deviceStream, nullptr, "k_calc_nb_exp", args);
++            cudaEventRecord(ev[2 * (rep * nk + k) + 1], stream);
++        }
++    }
++    cudaStreamSynchronize(stream);
++    FILE* fp = std::fopen(r.file.c_str(), "a");
++    double refSq = 0;
++    for (int i = 0; i < n; i++)
++    {
++        const float3 a = forces[0][i];
++        refSq += double(a.x) * a.x + double(a.y) * a.y + double(a.z) * a.z;
++    }
++    for (size_t k = 0; k < nk; k++)
++    {
++        std::vector<float> t;
++        for (long rep = 0; rep < r.reps; rep++)
++        {
++            float ms = 0;
++            cudaEventElapsedTime(&ms, ev[2 * (rep * nk + k)], ev[2 * (rep * nk + k) + 1]);
++            t.push_back(ms * 1000.0F);
++        }
++        std::sort(t.begin(), t.end());
++        double dSq = 0, maxAbs = 0;
++        for (int i = 0; i < n; i++)
++        {
++            const float3 a = forces[0][i], b = forces[k][i];
++            const double dx = double(b.x) - a.x, dy = double(b.y) - a.y, dz = double(b.z) - a.z;
++            dSq += dx * dx + dy * dy + dz * dz;
++            maxAbs = std::max(maxAbs, std::max(std::fabs(dx), std::max(std::fabs(dy), std::fabs(dz))));
++        }
++        if (fp)
++        {
++            std::fprintf(fp,
++                         "replay call=%ld variant=%s reps=%ld median_us=%.3f p10_us=%.3f p90_us=%.3f min_us=%.3f "
++                         "f_rel_rms=%.3e f_max_abs=%.3e natoms=%d nblock=%zu\n",
++                         r.calls, names[k].c_str(), r.reps, t[t.size() / 2], t[t.size() / 10],
++                         t[(t.size() * 9) / 10], t[0], refSq > 0 ? std::sqrt(dSq / refSq) : 0.0, maxAbs, n,
++                         config.gridSize[0]);
++        }
++    }
++    if (fp)
++    {
++        std::fclose(fp);
++    }
++    for (auto& e : ev)
++    {
++        cudaEventDestroy(e);
++    }
++}
++
+ void gpu_launch_kernel(NbnxmGpu* nb, const gmx::StepWorkload& stepWork, const InteractionLocality iloc)
+ {
+     NBAtomDataGpu*      adat         = nb->atdat;
+@@ -604,12 +772,38 @@ void gpu_launch_kernel(NbnxmGpu* nb, const gmx::StepWorkload& stepWork, const In
+      * kernel. bDoPrune being true implies we are not using dynamic pruning and are in the first
+      * call to the interaction kernel after a neighbour list step */
+     bool       bDoPrune = (plist->haveFreshList && !nb->timers->interaction[iloc].didPrune);
+-    const auto kernel   = select_nbnxn_kernel(
++    const auto prodKernel = select_nbnxn_kernel(
+             nbp->elecType, nbp->vdwType, stepWork.computeEnergy, bDoPrune, &nb->deviceContext_->deviceInfo());
++    const bool isExpFlavour = (prodKernel == nbnxn_kernel_ElecEw_VdwLJFsw_F_cuda);
++    auto       kernel       = prodKernel;
++    if (isExpFlavour && expNbVariant() >= 0 && expNbVariant() < gmxExpNbNumVariants)
++    {
++        static bool cacheConfigSet = false;
++        if (!cacheConfigSet)
++        {
++            cudaFuncSetCacheConfig(gmxExpNbVariants[expNbVariant()], cudaFuncCachePreferEqual);
++            cacheConfigSet = true;
++        }
++        kernel = gmxExpNbVariants[expNbVariant()];
++    }
+     const auto kernelArgs =
+             prepareGpuKernelArguments(kernel, config, adat, nbp, plist, &stepWork.computeVirial);
+     launchGpuKernel(kernel, config, deviceStream, timingEvent, "k_calc_nb", kernelArgs);
+ 
++    if (isExpFlavour && iloc == InteractionLocality::Local)
++    {
++        auto& r = expNbReplay();
++        if (r.enabled)
++        {
++            r.calls++;
++            if (r.calls >= r.first && (r.calls - r.first) % r.every == 0 && r.done < r.count)
++            {
++                expNbReplayRun(r, prodKernel, config, adat, nbp, plist, deviceStream);
++                r.done++;
++            }
++        }
++    }
++
+     if (bDoPrune)
+     {
+         gpuLaunchKernelSciSort(plist, deviceStream);
+diff --git a/src/gromacs/nbnxm/cuda/nbnxm_cuda_kernel.cuh b/src/gromacs/nbnxm/cuda/nbnxm_cuda_kernel.cuh
+index 1156eca6c3..17ca5b95e9 100644
+--- a/src/gromacs/nbnxm/cuda/nbnxm_cuda_kernel.cuh
++++ b/src/gromacs/nbnxm/cuda/nbnxm_cuda_kernel.cuh
+@@ -64,6 +64,21 @@ namespace gmx
+ #    define EL_EWALD_ANY
+ #endif
+ 
++/* THROWAWAY EXPERIMENT (gromacs-exp-gpukern): kernel variants selected by the NBEXP bit mask, defined
++ * only by nbnxm_cuda_kernel_exp.cu before including this file; production kernels have NBEXP_LOCAL 0.
++ *   1  factored force switch: (c12*(B2+B3 s) - c6*(A2+A3 s)) * s^2/r with s = max(r - rsw, 0)
++ *   2  Ewald correction polynomials in Horner form (constants as FFMA immediates, no z^4)
++ *   4  LJ parameter row pointer hoisted per j-cluster, i-types pre-multiplied by ntypes
++ *   8  knock-out: no force switch                  (TIMING ONLY, wrong physics)
++ *  16  knock-out: no Ewald real-space correction    (TIMING ONLY, wrong physics)
++ *  32  knock-out: no LJ (no fetch, no LJ, no switch) (TIMING ONLY, wrong physics)
++ */
++#ifdef NBEXP
++#    define NBEXP_LOCAL (NBEXP)
++#else
++#    define NBEXP_LOCAL 0
++#endif
++
+ #if defined LJ_EWALD_COMB_GEOM || defined LJ_EWALD_COMB_LB
+ /* Note: convenience macro, needs to be undef-ed at the end of the file. */
+ #    define LJ_EWALD
+@@ -130,7 +145,12 @@ namespace gmx
+  * Note: convenience macros, need to be undef-ed at the end of the file.
+  */
+ #define NTHREAD_Z (1)
+-#define MIN_BLOCKS_PER_MP (16)
++#ifdef NBEXP_MINBLOCKS
++/* THROWAWAY EXPERIMENT: fewer blocks per SM -> more registers per thread allowed */
++#    define MIN_BLOCKS_PER_MP (NBEXP_MINBLOCKS)
++#else
++#    define MIN_BLOCKS_PER_MP (16)
++#endif
+ #define THREADS_PER_BLOCK (c_clusterSize * c_clusterSize * NTHREAD_Z)
+ 
+ /**@}*/
+@@ -344,7 +364,11 @@ __launch_bounds__(THREADS_PER_BLOCK, MIN_BLOCKS_PER_MP)
+ 
+ #    ifndef LJ_COMB
+         /* Pre-load the i-atom types into shared memory */
++#        if NBEXP_LOCAL & 4
++        atib[tidxj * c_clusterSize + tidxi] = atom_types[ai] * ntypes;
++#        else
+         atib[tidxj * c_clusterSize + tidxi] = atom_types[ai];
++#        endif
+ #    else
+         /* Pre-load the LJ combination parameters into shared memory */
+         ljcpib[tidxj * c_clusterSize + tidxi] = lj_comb[ai];
+@@ -469,6 +493,9 @@ __launch_bounds__(THREADS_PER_BLOCK, MIN_BLOCKS_PER_MP)
+ #    endif
+ #    ifndef LJ_COMB
+                     typej = atom_types[aj];
++#        if NBEXP_LOCAL & 4
++                    const float2* gm_nbfpJ = nbparam.nbfp + typej;
++#        endif
+ #    else
+                     ljcp_j = lj_comb[aj];
+ #    endif
+@@ -519,7 +546,18 @@ __launch_bounds__(THREADS_PER_BLOCK, MIN_BLOCKS_PER_MP)
+ #    ifndef LJ_COMB
+                                 /* LJ 6*C6 and 12*C12 */
+                                 typei = atib[i * c_clusterSize + tidxi];
++#        if NBEXP_LOCAL & 32
++                                c6  = 0.0F;
++                                c12 = 0.0F;
++#        elif NBEXP_LOCAL & 4
++                                {
++                                    const float2 c6c12 = LDG(gm_nbfpJ + typei);
++                                    c6                 = c6c12.x;
++                                    c12                = c6c12.y;
++                                }
++#        else
+                                 fetch_nbfp_c6_c12(c6, c12, nbparam, ntypes * typei + typej);
++#        endif
+ #    else
+                                 ljcp_i = ljcpib[i * c_clusterSize + tidxi];
+ #        ifdef LJ_COMB_GEOM
+@@ -548,7 +586,11 @@ __launch_bounds__(THREADS_PER_BLOCK, MIN_BLOCKS_PER_MP)
+                                 inv_r6 *= int_bit;
+ #        endif /* EXCLUSION_FORCES */
+ 
++#        if NBEXP_LOCAL & 32
++                                F_invr = 0.0F;
++#        else
+                                 F_invr = inv_r6 * (c12 * inv_r6 - c6) * inv_r2;
++#        endif
+ #        if defined CALC_ENERGIES || defined LJ_POT_SWITCH
+                                 E_lj_p = int_bit
+                                          * (c12 * (inv_r6 * inv_r6 + nbparam.repulsion_shift.cpot) * c_oneTwelfth
+@@ -568,6 +610,15 @@ __launch_bounds__(THREADS_PER_BLOCK, MIN_BLOCKS_PER_MP)
+ #    ifdef LJ_FORCE_SWITCH
+ #        ifdef CALC_ENERGIES
+                                 calculate_force_switch_F_E(nbparam, c6, c12, inv_r, r2, &F_invr, &E_lj_p);
++#        elif NBEXP_LOCAL & (8 | 32)
++                                /* knock-out: no force switch */
++#        elif NBEXP_LOCAL & 1
++                                {
++                                    const float rSw = fmaxf(r2 * inv_r - nbparam.rvdw_switch, 0.0F);
++                                    const float tD  = nbparam.dispersion_shift.c2 + nbparam.dispersion_shift.c3 * rSw;
++                                    const float tR  = nbparam.repulsion_shift.c2 + nbparam.repulsion_shift.c3 * rSw;
++                                    F_invr += (c12 * tR - c6 * tD) * (rSw * rSw * inv_r);
++                                }
+ #        else
+                                 calculate_force_switch_F(nbparam, c6, c12, inv_r, r2, &F_invr);
+ #        endif /* CALC_ENERGIES */
+@@ -638,7 +689,12 @@ __launch_bounds__(THREADS_PER_BLOCK, MIN_BLOCKS_PER_MP)
+ #    ifdef EL_RF
+                                 F_invr += qi * qj_f * (int_bit * inv_r2 * inv_r - two_k_rf);
+ #    endif
+-#    if defined EL_EWALD_ANA
++#    if defined EL_EWALD_ANA && (NBEXP_LOCAL & 16)
++                                F_invr += qi * qj_f * (int_bit * inv_r2 * inv_r);
++#    elif defined EL_EWALD_ANA && (NBEXP_LOCAL & 2)
++                                F_invr += qi * qj_f
++                                          * (int_bit * inv_r2 * inv_r + pmeCorrFHorner(beta2 * r2) * beta3);
++#    elif defined EL_EWALD_ANA
+                                 F_invr += qi * qj_f
+                                           * (int_bit * inv_r2 * inv_r + pmeCorrF(beta2 * r2) * beta3);
+ #    elif defined EL_EWALD_TAB
+@@ -751,6 +807,9 @@ __launch_bounds__(THREADS_PER_BLOCK, MIN_BLOCKS_PER_MP)
+ #undef THREADS_PER_BLOCK
+ 
+ #undef EL_EWALD_ANY
++#undef NBEXP_LOCAL
++#undef NBEXP
++#undef NBEXP_MINBLOCKS
+ #undef EXCLUSION_FORCES
+ #undef LJ_EWALD
+ 
+diff --git a/src/gromacs/nbnxm/nbnxm_kernel_utils.h b/src/gromacs/nbnxm/nbnxm_kernel_utils.h
+index f136b40872..2b29d56d71 100644
+--- a/src/gromacs/nbnxm/nbnxm_kernel_utils.h
++++ b/src/gromacs/nbnxm/nbnxm_kernel_utils.h
+@@ -247,6 +247,40 @@ static inline GMX_ALWAYS_INLINE float pmeCorrF(const float z2)
+     return polyFN0 * polyFD0;
+ }
+ 
++/*! \brief THROWAWAY EXPERIMENT: pmeCorrF with both polynomials in Horner form, so that every
++ * coefficient but the leading ones is an FFMA immediate (no constant MOVs, no z^4). Same
++ * coefficients, different rounding order. */
++static inline GMX_ALWAYS_INLINE float pmeCorrFHorner(const float z2)
++{
++    constexpr float FN6 = -1.7357322914161492954e-8F;
++    constexpr float FN5 = 1.4703624142580877519e-6F;
++    constexpr float FN4 = -0.000053401640219807709149F;
++    constexpr float FN3 = 0.0010054721316683106153F;
++    constexpr float FN2 = -0.019278317264888380590F;
++    constexpr float FN1 = 0.069670166153766424023F;
++    constexpr float FN0 = -0.75225204789749321333F;
++
++    constexpr float FD4 = 0.0011193462567257629232F;
++    constexpr float FD3 = 0.014866955030185295499F;
++    constexpr float FD2 = 0.11583842382862377919F;
++    constexpr float FD1 = 0.50736591960530292870F;
++    constexpr float FD0 = 1.0F;
++
++    float polyFD = FD4 * z2 + FD3;
++    polyFD       = polyFD * z2 + FD2;
++    polyFD       = polyFD * z2 + FD1;
++    polyFD       = polyFD * z2 + FD0;
++
++    float polyFN = FN6 * z2 + FN5;
++    polyFN       = polyFN * z2 + FN4;
++    polyFN       = polyFN * z2 + FN3;
++    polyFN       = polyFN * z2 + FN2;
++    polyFN       = polyFN * z2 + FN1;
++    polyFN       = polyFN * z2 + FN0;
++
++    return polyFN * (1.0F / polyFD);
++}
++
+ /*! \brief Interpolate Ewald coulomb force correction using the F*r table. */
+ static inline GMX_ALWAYS_INLINE float interpolateCoulombForceR(const float* a_coulombTab,
+                                                                const float  coulombTabScale,
+diff --git a/src/gromacs/nbnxm/cuda/nbnxm_cuda_kernel_exp.cu b/src/gromacs/nbnxm/cuda/nbnxm_cuda_kernel_exp.cu
+new file mode 100644
+index 0000000000..2f3623776c
+--- /dev/null
++++ b/src/gromacs/nbnxm/cuda/nbnxm_cuda_kernel_exp.cu
+@@ -0,0 +1,111 @@
++/*
++ * THROWAWAY EXPERIMENT (worktree gromacs-exp-gpukern, not for src/ of the fork):
++ * variants of the force-only, no-prune ElecEw_VdwLJFsw nonbonded kernel (the MAS1 production
++ * flavour), selected at run time by GMX_EXP_NB_VARIANT and timed in-process by GMX_EXP_NB_REPLAY
++ * (see nbnxm_cuda.cu). The NBEXP bits are documented in nbnxm_cuda_kernel.cuh.
++ */
++#include "gmxpre.h"
++
++#include "gromacs/gpu_utils/cudautils.cuh"
++
++#include "nbnxm_cuda_kernel_utils.cuh"
++#include "nbnxm_cuda_types.h"
++
++#define EL_EWALD_ANA
++#define LJ_FORCE_SWITCH
++
++#define NBEXP 0
++#define NB_KERNEL_FUNC_NAME(x, ...) x##_ElecEw_VdwLJFsw_exp0##__VA_ARGS__
++#include "nbnxm_cuda_kernel.cuh"
++#undef NB_KERNEL_FUNC_NAME
++#define NBEXP 1
++#define NB_KERNEL_FUNC_NAME(x, ...) x##_ElecEw_VdwLJFsw_exp1##__VA_ARGS__
++#include "nbnxm_cuda_kernel.cuh"
++#undef NB_KERNEL_FUNC_NAME
++#define NBEXP 2
++#define NB_KERNEL_FUNC_NAME(x, ...) x##_ElecEw_VdwLJFsw_exp2##__VA_ARGS__
++#include "nbnxm_cuda_kernel.cuh"
++#undef NB_KERNEL_FUNC_NAME
++#define NBEXP 4
++#define NB_KERNEL_FUNC_NAME(x, ...) x##_ElecEw_VdwLJFsw_exp4##__VA_ARGS__
++#include "nbnxm_cuda_kernel.cuh"
++#undef NB_KERNEL_FUNC_NAME
++#define NBEXP 7
++#define NB_KERNEL_FUNC_NAME(x, ...) x##_ElecEw_VdwLJFsw_exp7##__VA_ARGS__
++#include "nbnxm_cuda_kernel.cuh"
++#undef NB_KERNEL_FUNC_NAME
++#define NBEXP 5
++#define NB_KERNEL_FUNC_NAME(x, ...) x##_ElecEw_VdwLJFsw_exp5##__VA_ARGS__
++#include "nbnxm_cuda_kernel.cuh"
++#undef NB_KERNEL_FUNC_NAME
++#define NBEXP 8
++#define NB_KERNEL_FUNC_NAME(x, ...) x##_ElecEw_VdwLJFsw_exp8##__VA_ARGS__
++#include "nbnxm_cuda_kernel.cuh"
++#undef NB_KERNEL_FUNC_NAME
++#define NBEXP 16
++#define NB_KERNEL_FUNC_NAME(x, ...) x##_ElecEw_VdwLJFsw_exp16##__VA_ARGS__
++#include "nbnxm_cuda_kernel.cuh"
++#undef NB_KERNEL_FUNC_NAME
++#define NBEXP 32
++#define NB_KERNEL_FUNC_NAME(x, ...) x##_ElecEw_VdwLJFsw_exp32##__VA_ARGS__
++#include "nbnxm_cuda_kernel.cuh"
++#undef NB_KERNEL_FUNC_NAME
++
++#define NBEXP 0
++#define NBEXP_MINBLOCKS 12
++#define NB_KERNEL_FUNC_NAME(x, ...) x##_ElecEw_VdwLJFsw_exp0mb12##__VA_ARGS__
++#include "nbnxm_cuda_kernel.cuh"
++#undef NB_KERNEL_FUNC_NAME
++#define NBEXP 7
++#define NBEXP_MINBLOCKS 12
++#define NB_KERNEL_FUNC_NAME(x, ...) x##_ElecEw_VdwLJFsw_exp7mb12##__VA_ARGS__
++#include "nbnxm_cuda_kernel.cuh"
++#undef NB_KERNEL_FUNC_NAME
++#define NBEXP 0
++#define NBEXP_MINBLOCKS 10
++#define NB_KERNEL_FUNC_NAME(x, ...) x##_ElecEw_VdwLJFsw_exp0mb10##__VA_ARGS__
++#include "nbnxm_cuda_kernel.cuh"
++#undef NB_KERNEL_FUNC_NAME
++#define NBEXP 7
++#define NBEXP_MINBLOCKS 10
++#define NB_KERNEL_FUNC_NAME(x, ...) x##_ElecEw_VdwLJFsw_exp7mb10##__VA_ARGS__
++#include "nbnxm_cuda_kernel.cuh"
++#undef NB_KERNEL_FUNC_NAME
++#define NBEXP 3
++#define NB_KERNEL_FUNC_NAME(x, ...) x##_ElecEw_VdwLJFsw_exp3##__VA_ARGS__
++#include "nbnxm_cuda_kernel.cuh"
++#undef NB_KERNEL_FUNC_NAME
++
++#undef EL_EWALD_ANA
++#undef LJ_FORCE_SWITCH
++
++namespace gmx
++{
++
++typedef void (*nbnxn_cu_kfunc_ptr_t)(const NBAtomDataGpu, const NBParamGpu, const GpuPairlist, bool);
++
++//! Variant table used by nbnxm_cuda.cu (index = position, name = NBEXP mask meaning)
++extern const nbnxn_cu_kfunc_ptr_t gmxExpNbVariants[]   = { nbnxn_kernel_ElecEw_VdwLJFsw_exp0_F_cuda,
++                                                         nbnxn_kernel_ElecEw_VdwLJFsw_exp1_F_cuda,
++                                                         nbnxn_kernel_ElecEw_VdwLJFsw_exp2_F_cuda,
++                                                         nbnxn_kernel_ElecEw_VdwLJFsw_exp4_F_cuda,
++                                                         nbnxn_kernel_ElecEw_VdwLJFsw_exp7_F_cuda,
++                                                         nbnxn_kernel_ElecEw_VdwLJFsw_exp5_F_cuda,
++                                                         nbnxn_kernel_ElecEw_VdwLJFsw_exp8_F_cuda,
++                                                         nbnxn_kernel_ElecEw_VdwLJFsw_exp16_F_cuda,
++                                                         nbnxn_kernel_ElecEw_VdwLJFsw_exp32_F_cuda,
++                                                         nbnxn_kernel_ElecEw_VdwLJFsw_exp0mb12_F_cuda,
++                                                         nbnxn_kernel_ElecEw_VdwLJFsw_exp7mb12_F_cuda,
++                                                         nbnxn_kernel_ElecEw_VdwLJFsw_exp0mb10_F_cuda,
++                                                         nbnxn_kernel_ElecEw_VdwLJFsw_exp7mb10_F_cuda,
++                                                         nbnxn_kernel_ElecEw_VdwLJFsw_exp3_F_cuda };
++extern const char* const gmxExpNbVariantNames[] = { "exp0-same-as-prod", "exp1-fsw-factored",
++                                                    "exp2-ewald-horner", "exp4-ljfetch-hoisted",
++                                                    "exp7-all-three",    "exp5-fsw+ljfetch",
++                                                    "ko8-no-fsw",        "ko16-no-ewald-corr",
++                                                    "ko32-no-lj",        "exp0-mb12",
++                                                    "exp7-mb12",         "exp0-mb10",
++                                                    "exp7-mb10",         "exp3-fsw+ewh" };
++extern const int gmxExpNbNumVariants = 14;
++
++} // namespace gmx
