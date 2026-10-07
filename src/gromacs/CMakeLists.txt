@@ -461,6 +461,13 @@ if (GMX_OPENMP)
     if (GMX_GPU_CUDA AND CMAKE_VERSION VERSION_GREATER_EQUAL 3.31)
         # Since CMake 3.31, OpenMP::OpenMP_CUDA is needed for files with LANGUAGE CUDA
         target_link_libraries(libgromacs PRIVATE OpenMP::OpenMP_CUDA)
+    elseif (GMX_GPU_CUDA AND NOT GMX_CLANG_CUDA)
+        # Older CMake has no OpenMP::OpenMP_CUDA, and OpenMP::OpenMP_CXX only adds its flags to CXX
+        # sources. Without them, nvcc compiles the OpenMP pragmas in host code of files with
+        # LANGUAGE CUDA (e.g. GPU bonded and LINCS setup on search steps) as serial code.
+        separate_arguments(_gmx_openmp_cuda_host_flags NATIVE_COMMAND "${OpenMP_CXX_FLAGS}")
+        list(TRANSFORM _gmx_openmp_cuda_host_flags PREPEND "-Xcompiler=")
+        target_compile_options(libgromacs PRIVATE "$<$<COMPILE_LANGUAGE:CUDA>:${_gmx_openmp_cuda_host_flags}>")
     endif()
 endif()
 set_target_properties(libgromacs PROPERTIES
