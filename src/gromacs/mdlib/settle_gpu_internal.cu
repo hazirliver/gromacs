@@ -71,9 +71,32 @@ constexpr static int sc_threadsPerBlock = 256;
 //! Maximum number of threads in a block (for __launch_bounds__)
 constexpr static int sc_maxThreadsPerBlock = sc_threadsPerBlock;
 
+//! Number of floats in the coordinates (or velocities) of one water molecule
+constexpr static int sc_floatsPerWater = 3 * DIM;
+
+//! Read the float3 starting at float index \p index of a shared-memory staging buffer
+static __device__ __forceinline__ float3 loadStaged(const float* sm_buffer, const int index)
+{
+    return make_float3(sm_buffer[index], sm_buffer[index + 1], sm_buffer[index + 2]);
+}
+
+//! Write \p value at float index \p index of a shared-memory staging buffer
+static __device__ __forceinline__ void storeStaged(float* sm_buffer, const int index, const float3 value)
+{
+    sm_buffer[index]     = value.x;
+    sm_buffer[index + 1] = value.y;
+    sm_buffer[index + 2] = value.z;
+}
+
 /*! \brief SETTLE constraints kernel
  *
  * Each thread corresponds to a single constraints triangle (i.e. single water molecule).
+ *
+ * When the waters of a block are stored as consecutive atoms (O,H,H,O,H,H,...), which is the usual
+ * layout, the coordinates and velocities of the whole block are moved between global and shared
+ * memory with coalesced accesses. Otherwise every thread accesses the three atoms of its water
+ * directly, which with a 36-byte stride per water uses only a small fraction of each memory
+ * transaction. The arithmetic is the same in both cases.
  *
  * See original CPU version in settle.cpp
  *
@@ -121,21 +144,60 @@ __launch_bounds__(sc_maxThreadsPerBlock) __global__
 
     extern __shared__ float sm_threadVirial[];
 
+    // Staging buffers for the coordinates and velocities of the waters of this block
+    __shared__ float sm_x[sc_floatsPerWater * sc_threadsPerBlock];
+    __shared__ float sm_xprime[sc_floatsPerWater * sc_threadsPerBlock];
+    __shared__ float sm_v[updateVelocities ? sc_floatsPerWater * sc_threadsPerBlock : 1];
+
     int tid = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+
+    // Use the staging buffers only when all waters of the block are consecutive atoms
+    const int blockFirstSettle = static_cast<int>(blockIdx.x * blockDim.x);
+    const int blockFirstAtom   = gm_settles[blockFirstSettle].ow1;
+    bool      isConsecutive    = true;
+    if (tid < numSettles)
+    {
+        const WaterMolecule water = gm_settles[tid];
+        isConsecutive = (water.ow1 == blockFirstAtom + 3 * static_cast<int>(threadIdx.x))
+                        && (water.hw2 == water.ow1 + 1) && (water.hw3 == water.ow1 + 2);
+    }
+    const bool staged = __syncthreads_and(isConsecutive);
+
+    const int numStagedFloats =
+            sc_floatsPerWater * min(static_cast<int>(blockDim.x), numSettles - blockFirstSettle);
+    const float* gm_xBlock      = reinterpret_cast<const float*>(gm_x) + DIM * blockFirstAtom;
+    float*       gm_xprimeBlock = reinterpret_cast<float*>(gm_xprime) + DIM * blockFirstAtom;
+    float*       gm_vBlock      = reinterpret_cast<float*>(gm_v) + DIM * blockFirstAtom;
+    if (staged)
+    {
+        for (int i = threadIdx.x; i < numStagedFloats; i += blockDim.x)
+        {
+            sm_x[i]      = gm_xBlock[i];
+            sm_xprime[i] = gm_xprimeBlock[i];
+            if constexpr (updateVelocities)
+            {
+                sm_v[i] = gm_vBlock[i];
+            }
+        }
+        __syncthreads();
+    }
+    // Indices of the three atoms of this thread's water in the staging buffers
+    const int sIndexOw1 = sc_floatsPerWater * static_cast<int>(threadIdx.x);
+    const int sIndexHw2 = sIndexOw1 + DIM;
+    const int sIndexHw3 = sIndexOw1 + 2 * DIM;
 
     if (tid < numSettles)
     {
         // These are the indexes of three atoms in a single 'water' molecule.
-        // TODO Can be reduced to one integer if atoms are consecutive in memory.
-        WaterMolecule indices = gm_settles[tid];
+        const WaterMolecule indices = gm_settles[tid];
 
-        float3 x_ow1 = gm_x[indices.ow1];
-        float3 x_hw2 = gm_x[indices.hw2];
-        float3 x_hw3 = gm_x[indices.hw3];
+        float3 x_ow1 = staged ? loadStaged(sm_x, sIndexOw1) : gm_x[indices.ow1];
+        float3 x_hw2 = staged ? loadStaged(sm_x, sIndexHw2) : gm_x[indices.hw2];
+        float3 x_hw3 = staged ? loadStaged(sm_x, sIndexHw3) : gm_x[indices.hw3];
 
-        float3 xprime_ow1 = gm_xprime[indices.ow1];
-        float3 xprime_hw2 = gm_xprime[indices.hw2];
-        float3 xprime_hw3 = gm_xprime[indices.hw3];
+        float3 xprime_ow1 = staged ? loadStaged(sm_xprime, sIndexOw1) : gm_xprime[indices.ow1];
+        float3 xprime_hw2 = staged ? loadStaged(sm_xprime, sIndexHw2) : gm_xprime[indices.hw2];
+        float3 xprime_hw3 = staged ? loadStaged(sm_xprime, sIndexHw3) : gm_xprime[indices.hw3];
 
         float3 dist21 = pbcDxAiuc(pbcAiuc, x_hw2, x_ow1);
         float3 dist31 = pbcDxAiuc(pbcAiuc, x_hw3, x_ow1);
@@ -270,24 +332,42 @@ __launch_bounds__(sc_maxThreadsPerBlock) __global__
         const float3 dxHw2 = b3 - b1;
         const float3 dxHw3 = c3 - c1;
 
-        gm_xprime[indices.ow1] = xprime_ow1 + dxOw1;
-        gm_xprime[indices.hw2] = xprime_hw2 + dxHw2;
-        gm_xprime[indices.hw3] = xprime_hw3 + dxHw3;
+        if (staged)
+        {
+            storeStaged(sm_xprime, sIndexOw1, xprime_ow1 + dxOw1);
+            storeStaged(sm_xprime, sIndexHw2, xprime_hw2 + dxHw2);
+            storeStaged(sm_xprime, sIndexHw3, xprime_hw3 + dxHw3);
+        }
+        else
+        {
+            gm_xprime[indices.ow1] = xprime_ow1 + dxOw1;
+            gm_xprime[indices.hw2] = xprime_hw2 + dxHw2;
+            gm_xprime[indices.hw3] = xprime_hw3 + dxHw3;
+        }
 
         if constexpr (updateVelocities)
         {
-            float3 v_ow1 = gm_v[indices.ow1];
-            float3 v_hw2 = gm_v[indices.hw2];
-            float3 v_hw3 = gm_v[indices.hw3];
+            float3 v_ow1 = staged ? loadStaged(sm_v, sIndexOw1) : gm_v[indices.ow1];
+            float3 v_hw2 = staged ? loadStaged(sm_v, sIndexHw2) : gm_v[indices.hw2];
+            float3 v_hw3 = staged ? loadStaged(sm_v, sIndexHw3) : gm_v[indices.hw3];
 
             /* Add the position correction divided by dt to the velocity */
             v_ow1 = dxOw1 * invdt + v_ow1;
             v_hw2 = dxHw2 * invdt + v_hw2;
             v_hw3 = dxHw3 * invdt + v_hw3;
 
-            gm_v[indices.ow1] = v_ow1;
-            gm_v[indices.hw2] = v_hw2;
-            gm_v[indices.hw3] = v_hw3;
+            if (staged)
+            {
+                storeStaged(sm_v, sIndexOw1, v_ow1);
+                storeStaged(sm_v, sIndexHw2, v_hw2);
+                storeStaged(sm_v, sIndexHw3, v_hw3);
+            }
+            else
+            {
+                gm_v[indices.ow1] = v_ow1;
+                gm_v[indices.hw2] = v_hw2;
+                gm_v[indices.hw3] = v_hw3;
+            }
         }
 
         if constexpr (computeVirial)
@@ -318,6 +398,18 @@ __launch_bounds__(sc_maxThreadsPerBlock) __global__
             for (int d = 0; d < 6; d++)
             {
                 sm_threadVirial[d * blockDim.x + threadIdx.x] = 0.0F;
+            }
+        }
+    }
+    if (staged)
+    {
+        __syncthreads();
+        for (int i = threadIdx.x; i < numStagedFloats; i += blockDim.x)
+        {
+            gm_xprimeBlock[i] = sm_xprime[i];
+            if constexpr (updateVelocities)
+            {
+                gm_vBlock[i] = sm_v[i];
             }
         }
     }
