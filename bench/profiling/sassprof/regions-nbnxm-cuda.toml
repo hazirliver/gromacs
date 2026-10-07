@@ -1,0 +1,75 @@
+# Code regions of the CUDA nonbonded kernel (nbnxm_cuda_kernel.cuh at v2026.4 / dev 3df7585464) for
+# sassanalyze.py. A SASS instruction belongs to the first region (in this file's order) that matches a
+# frame of its inline chain, innermost frame first; helper functions are matched in their own files.
+[[region]]
+name = "force switch (ljForceSwitch)"
+file = "nbnxm/nbnxm_kernel_utils.h"
+lines = [66, 109]
+[[region]]
+name = "Ewald correction (pmeCorrF)"
+file = "nbnxm/nbnxm_kernel_utils.h"
+lines = [213, 248]
+[[region]]
+name = "LJ table fetch (nbfp)"
+file = "nbnxm/cuda/nbnxm_cuda_kernel_utils.cuh"
+lines = [350, 366]
+[[region]]
+name = "j-force reduction (shfl + RED)"
+file = "nbnxm/cuda/nbnxm_cuda_kernel_utils.cuh"
+lines = [384, 418]
+[[region]]
+name = "i-force reduction (shfl + RED)"
+file = "nbnxm/cuda/nbnxm_cuda_kernel_utils.cuh"
+lines = [510, 553]
+[[region]]
+name = "force switch (ljForceSwitch)"
+file = "nbnxm/cuda/nbnxm_cuda_kernel_utils.cuh"
+lines = [100, 108]
+[[region]]
+name = "setup + i-cluster preload"
+file = "nbnxm/cuda/nbnxm_cuda_kernel.cuh"
+lines = [140, 425]
+[[region]]
+name = "j-packed loop: imask/excl loads"
+file = "nbnxm/cuda/nbnxm_cuda_kernel.cuh"
+lines = [426, 448]
+[[region]]
+name = "jm loop: mask test, cj + j-atom loads"
+file = "nbnxm/cuda/nbnxm_cuda_kernel.cuh"
+lines = [449, 480]
+[[region]]
+name = "i loop: i-atom load + distance"
+file = "nbnxm/cuda/nbnxm_cuda_kernel.cuh"
+lines = [481, 504]
+[[region]]
+name = "exclusion + cut-off test"
+file = "nbnxm/cuda/nbnxm_cuda_kernel.cuh"
+lines = [505, 518]
+[[region]]
+name = "LJ table fetch (nbfp)"
+file = "nbnxm/cuda/nbnxm_cuda_kernel.cuh"
+lines = [519, 537]
+[[region]]
+name = "rsqrt + LJ r^-6 force"
+file = "nbnxm/cuda/nbnxm_cuda_kernel.cuh"
+lines = [538, 567]
+[[region]]
+name = "force switch (ljForceSwitch)"
+file = "nbnxm/cuda/nbnxm_cuda_kernel.cuh"
+lines = [568, 576]
+[[region]]
+name = "Coulomb + Ewald correction"
+file = "nbnxm/cuda/nbnxm_cuda_kernel.cuh"
+lines = [630, 664]
+[[region]]
+name = "force accumulation (f_ij)"
+file = "nbnxm/cuda/nbnxm_cuda_kernel.cuh"
+lines = [665, 678]
+[[region]]
+name = "j-force reduction (shfl + RED)"
+file = "nbnxm/cuda/nbnxm_cuda_kernel.cuh"
+lines = [679, 696]
+[[region]]
+name = "i-force reduction (shfl + RED)"
+file = "nbnxm/cuda/nbnxm_cuda_kernel.cuh"
+lines = [697, 746]

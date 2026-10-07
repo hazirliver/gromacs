@@ -1,0 +1,21 @@
+# Build profiles for the GPU-kernel profiling session (2026-10-07). Throwaway worktree:
+# /home/asokolov/Projects/gromacs-exp-gpukern (detached at dev; every change behind a GMX_EXP_* define,
+# patch in bench/profiling/experiments/exp-gpukern.patch). Production-like like profile cuda-nosub.
+
+# Same sources and flags as the production-like P build plus -lineinfo (source-line tables for
+# PC -> source attribution; must not change the SASS, checked with cuobjdump).
+[profiles.cuda-nosub-lineinfo]
+description = "cuda-nosub + -lineinfo (no code change)"
+cuda_arch = "auto"
+cmake = ["-DCMAKE_BUILD_TYPE=Release", "-DGMX_GPU=CUDA", "-DGMX_BUILD_OWN_FFTW=ON", "-DGMXAPI=OFF",
+         "-DGMX_INSTALL_NBLIB_API=OFF", "-DREGRESSIONTEST_DOWNLOAD=OFF", "-DCMAKE_CUDA_FLAGS=-lineinfo"]
+
+# All runtime-selectable experiments of the worktree (GMX_EXP_NB_VARIANT, GMX_EXP_NB_REPLAY,
+# GMX_EXP_SKIP_PME_SPREAD/FFT/GATHER, GMX_EXP_SKIP_BONDED, GMX_EXP_PME_ORDERSQ,
+# GMX_EXP_SPREAD_INTERLEAVE, GMX_EXP_CONCURRENT_SETTLE); with no GMX_EXP_* variable set the binary
+# runs the production code paths (checked: SASS of the production kernels identical to P).
+[profiles.cuda-nosub-gpukern]
+description = "cuda-nosub + -lineinfo, throwaway worktree with runtime-selectable kernel experiments"
+cuda_arch = "auto"
+cmake = ["-DCMAKE_BUILD_TYPE=Release", "-DGMX_GPU=CUDA", "-DGMX_BUILD_OWN_FFTW=ON", "-DGMXAPI=OFF",
+         "-DGMX_INSTALL_NBLIB_API=OFF", "-DREGRESSIONTEST_DOWNLOAD=OFF", "-DCMAKE_CUDA_FLAGS=-lineinfo"]
