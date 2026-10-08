@@ -103,7 +103,9 @@ def resolve(spec: str, profile: str, profiles: dict, label: str | None = None, e
     if spec == "WORKTREE":
         sha = _git("rev-parse", "HEAD")
         dirty = _worktree_dirty_hash()
-        real_src, src_key = REPO_ROOT, "WORKTREE"
+        # Keyed by the checkout's path: two checkouts (e.g. git worktrees) must not share a build directory,
+        # whose CMake cache would keep compiling the sources of whichever checkout configured it first.
+        real_src, src_key = REPO_ROOT, f"WORKTREE:{REPO_ROOT}"
     elif spec.startswith("src:"):
         real_src = Path(spec[4:]).resolve()
         sha = _git("rev-parse", "HEAD", cwd=real_src)
@@ -142,6 +144,17 @@ def _ensure_source(b: Build) -> None:
     _git("worktree", "add", "--detach", str(b.source_dir), b.sha)
 
 
+def _check_configured_source(b: Build) -> None:
+    """Refuse to build when an existing build directory was configured for another source tree."""
+    cache = b.build_dir / "CMakeCache.txt"
+    if not cache.exists():
+        return
+    m = re.search(r"^CMAKE_HOME_DIRECTORY:INTERNAL=(.*)$", cache.read_text(errors="replace"), re.MULTILINE)
+    if m and Path(m.group(1).strip()) != b.source_dir:
+        raise SystemExit(f"build directory {b.build_dir} was configured for {m.group(1).strip()}, not for "
+                         f"{b.source_dir} ({b.label}); remove the build directory and run again")
+
+
 def ensure_built(b: Build, jobs: int | None = None, targets=("gmx",), force: bool = False) -> Build:
     """Configure and build if needed. Rebuilds a WORKTREE build when its sources changed."""
     if b.profile == "external":
@@ -157,6 +170,7 @@ def ensure_built(b: Build, jobs: int | None = None, targets=("gmx",), force: boo
     _ensure_source(b)
     b.build_dir.mkdir(parents=True, exist_ok=True)
     jobs = jobs or max(1, (os.cpu_count() or 2) - 2)
+    _check_configured_source(b)
     if not (b.build_dir / "CMakeCache.txt").exists():
         log(f"configuring {b.label} [{b.profile}] in {b.build_dir}")
         run(["cmake", "-S", b.source_dir, "-B", b.build_dir, *b.cmake_args],

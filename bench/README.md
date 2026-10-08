@@ -46,7 +46,7 @@ Build specs (`-A`, `-B`, `--build`):
 
 | spec | meaning |
 |---|---|
-| `WORKTREE` | the current checkout incl. uncommitted changes; one persistent build dir, rebuilt incrementally |
+| `WORKTREE` | the current checkout incl. uncommitted changes; one persistent build dir per checkout, rebuilt incrementally |
 | `<git ref>` | branch / tag / commit, checked out into a detached `git worktree` and built separately |
 | `src:/dir` | another source tree (e.g. a second clone or a patched copy); built incrementally like `WORKTREE` |
 | `path:/dir` | an existing build directory containing `bin/gmx` |
