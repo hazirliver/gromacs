@@ -15,6 +15,11 @@
   invocation; use `--target-only --tier smoke` for a ~5 min loop while developing.
 - After changing `bench/` itself, run `bench/validation/run_validation.sh`.
 
+## Performance work
+- Start with `bench/OPTIMIZATION.md`: current state, what was measured and rejected, open opportunities,
+  profiling tools (`bench/profiling/`) and environment gotchas. Reports are in `bench/reports/`.
+- Record every new result there (positive or negative) and add a report under `bench/reports/`.
+
 ## Data
 - `data/` holds customer input (the MAS1 system). Never commit it; gmxbench reads it by path
   (`GMXBENCH_MAS1_ARCHIVE` overrides the location).
