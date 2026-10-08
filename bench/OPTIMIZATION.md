@@ -141,6 +141,10 @@ worktree; never merge them.
   place. Rebuild from a fresh configure before a perf A/B after any CMake change.
 * Builds whose source/build paths differ in length differed by ~4% in an A/A test: use gmxbench builds
   (fixed-length paths) for every comparison.
+* Before commit `c651203516`, `-B WORKTREE` used one build directory for every checkout, so running
+  gmxbench from a second checkout (git worktree) silently built the first checkout's sources. Results from
+  the main checkout, git refs and `src:` specs were not affected. gmxbench now keys WORKTREE builds by path
+  and refuses a build directory configured for another source tree.
 * CPU `-reprod` runs are bitwise reproducible (also with DD and PME ranks); GPU runs never are and are judged
   against their own noise.
 * mdrun keeps `nstlist` at 20 for NVE (`-nstlist` is ignored), so NVE runs are slower than production.
