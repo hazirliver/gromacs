@@ -1,0 +1,37 @@
+# H4: pair-list update interval (outer list; mdrun sets rlist from the Verlet buffer tolerance).
+repeats = 5
+[builds]
+P = "~/.cache/gmxbench/builds/3bf7713a0dd56c41"   # cuda-nosub (production-like)
+S = "~/.cache/gmxbench/builds/780edef73168a96d"   # cuda: cycle sub-counters + NVTX
+
+[tprs]
+prod = "bench/results/profiling-2026-10-06/raw/inputs/prod/topol.tpr"
+
+[defaults]
+build = "P"
+nsteps = 25000
+resetstep = 5000
+
+[[variant]]
+name = "nstlist80"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 80"
+
+[[variant]]
+name = "nstlist100"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 100"
+
+[[variant]]
+name = "nstlist150"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 150"
+
+[[variant]]
+name = "nstlist200"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+
+[[variant]]
+name = "nstlist300"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 300"
+
+[[variant]]
+name = "nstlist400"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 400"

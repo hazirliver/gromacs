@@ -1,0 +1,48 @@
+# H3: power limit and clock locking (sudo nvidia-smi; restored to the production state, 325 W and
+# unlocked clocks, after every run by the post hook).
+repeats = 5
+
+[builds]
+P = "~/.cache/gmxbench/builds/3bf7713a0dd56c41"
+
+[tprs]
+prod = "bench/results/profiling-2026-10-06/raw/inputs/prod/topol.tpr"
+nocmap = "bench/results/profiling-2026-10-06/raw/inputs/nocmap/topol.tpr"   # timing only
+
+[defaults]
+build = "P"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+nsteps = 25000
+resetstep = 5000
+post = "sudo nvidia-smi -rgc > /dev/null; sudo nvidia-smi -pl 325 > /dev/null"
+
+[[variant]]
+name = "pl250"
+pre = "sudo nvidia-smi -pl 250 > /dev/null"
+[[variant]]
+name = "pl300"
+pre = "sudo nvidia-smi -pl 300 > /dev/null"
+[[variant]]
+name = "pl325"
+pre = "sudo nvidia-smi -pl 325 > /dev/null"
+[[variant]]
+name = "pl350"
+pre = "sudo nvidia-smi -pl 350 > /dev/null"
+[[variant]]
+name = "lock2250-pl325"
+pre = "sudo nvidia-smi -pl 325 > /dev/null; sudo nvidia-smi -lgc 2250,2250 > /dev/null"
+[[variant]]
+name = "lock1980-pl325"
+pre = "sudo nvidia-smi -pl 325 > /dev/null; sudo nvidia-smi -lgc 1980,1980 > /dev/null"
+
+# the CMAP-port ceiling (timing-only input, graphs on) at the production and at the maximum power limit
+[[variant]]
+name = "nocmap-graph-pl325"
+tpr = "nocmap"
+env = { GMX_CUDA_GRAPH = "1" }
+pre = "sudo nvidia-smi -pl 325 > /dev/null"
+[[variant]]
+name = "nocmap-graph-pl350"
+tpr = "nocmap"
+env = { GMX_CUDA_GRAPH = "1" }
+pre = "sudo nvidia-smi -pl 350 > /dev/null"

@@ -1,0 +1,40 @@
+# THROWAWAY EXPERIMENT (worktree /home/asokolov/Projects/gromacs-exp-nbminblocks): the two changes that
+# passed `gmxbench quality --strict` (OpenMP for nvcc host code; GPU bonded kernel in its own stream),
+# separately and combined, and with -ntomp 20.
+repeats = 5
+
+[builds]
+P = "~/.cache/gmxbench/builds/3bf7713a0dd56c41"
+OMPCUDA = "~/.cache/gmxbench/builds/3136061f41d389dc"
+BSTREAM = "~/.cache/gmxbench/builds/44e346d549ee6c7d"
+COMBO = "~/.cache/gmxbench/builds/2f8c76e3571459cd"
+
+[tprs]
+prod = "bench/results/profiling-2026-10-06/raw/inputs/prod/topol.tpr"
+
+[defaults]
+tpr = "prod"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+nsteps = 25000
+resetstep = 5000
+
+[[variant]]
+name = "P"
+build = "P"
+[[variant]]
+name = "ompcuda"
+build = "OMPCUDA"
+[[variant]]
+name = "bondedstream"
+build = "BSTREAM"
+[[variant]]
+name = "combo"
+build = "COMBO"
+[[variant]]
+name = "combo-t20"
+build = "COMBO"
+args = "-ntmpi 1 -ntomp 20 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+[[variant]]
+name = "P-t20"
+build = "P"
+args = "-ntmpi 1 -ntomp 20 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"

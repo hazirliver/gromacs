@@ -1,0 +1,37 @@
+# H2: CMAP on the CPU. prod vs nocmap (timing only), each with and without GMX_CUDA_GRAPH=1.
+# nocmap+graph is the ceiling of a CMAP GPU port (graphs can engage only without CPU forces).
+repeats = 5
+[builds]
+P = "~/.cache/gmxbench/builds/3bf7713a0dd56c41"   # cuda-nosub (production-like)
+S = "~/.cache/gmxbench/builds/780edef73168a96d"   # cuda: cycle sub-counters + NVTX
+
+[tprs]
+prod = "bench/results/profiling-2026-10-06/raw/inputs/prod/topol.tpr"
+nocmap = "bench/results/profiling-2026-10-06/raw/inputs/nocmap/topol.tpr"
+
+[defaults]
+build = "P"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+nsteps = 25000
+resetstep = 5000
+
+[[variant]]
+name = "prod"
+tpr = "prod"
+[[variant]]
+name = "prod+graph"
+tpr = "prod"
+env = { GMX_CUDA_GRAPH = "1" }
+[[variant]]
+name = "nocmap"
+tpr = "nocmap"
+[[variant]]
+name = "nocmap+graph"
+tpr = "nocmap"
+env = { GMX_CUDA_GRAPH = "1" }
+# the same pair with the S build: md.log of S shows whether the "MD Graph" counter appears
+[[variant]]
+name = "nocmap+graph-S"
+tpr = "nocmap"
+build = "S"
+env = { GMX_CUDA_GRAPH = "1" }

@@ -1,0 +1,38 @@
+# THROWAWAY EXPERIMENT, TIMING ONLY (wrong physics): upper bounds of PME / bonded kernel work with the
+# real concurrency, by skipping kernel launches in the experiment build (worktree gromacs-exp-gpukern).
+# NB knock-out ko8 (no force switch) checks the NB-kernel-time -> step-time sensitivity.
+repeats = 3
+
+[builds]
+X = "~/.cache/gmxbench/builds/9194ba626fe54212"
+
+[tprs]
+prod = "bench/results/profiling-2026-10-06/raw/inputs/prod/topol.tpr"
+
+[defaults]
+tpr = "prod"
+build = "X"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+nsteps = 25000
+resetstep = 5000
+
+[[variant]]
+name = "X-base"
+[[variant]]
+name = "skip-spread"
+env = { GMX_EXP_SKIP_PME_SPREAD = "1" }
+[[variant]]
+name = "skip-fft-solve"
+env = { GMX_EXP_SKIP_PME_FFT = "1" }
+[[variant]]
+name = "skip-gather"
+env = { GMX_EXP_SKIP_PME_GATHER = "1" }
+[[variant]]
+name = "skip-pme-all"
+env = { GMX_EXP_SKIP_PME_SPREAD = "1", GMX_EXP_SKIP_PME_FFT = "1", GMX_EXP_SKIP_PME_GATHER = "1" }
+[[variant]]
+name = "skip-bonded"
+env = { GMX_EXP_SKIP_BONDED = "1" }
+[[variant]]
+name = "ko8-no-fsw"
+env = { GMX_EXP_NB_VARIANT = "6" }

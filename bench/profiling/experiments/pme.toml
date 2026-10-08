@@ -1,0 +1,47 @@
+# H4: PME tuner result vs fixed (rcoulomb, grid) points baked into the tpr (-notunepme), and the
+# tuner itself (steady state after it finished).
+repeats = 5
+[builds]
+P = "~/.cache/gmxbench/builds/3bf7713a0dd56c41"   # cuda-nosub (production-like)
+S = "~/.cache/gmxbench/builds/780edef73168a96d"   # cuda: cycle sub-counters + NVTX
+
+[tprs]
+prod = "bench/results/profiling-2026-10-06/raw/inputs/prod/topol.tpr"
+rc120 = "bench/results/profiling-2026-10-06/raw/inputs/pme-rc1.20/topol.tpr"
+rc125 = "bench/results/profiling-2026-10-06/raw/inputs/pme-rc1.25/topol.tpr"
+rc130 = "bench/results/profiling-2026-10-06/raw/inputs/pme-rc1.30/topol.tpr"
+rc135 = "bench/results/profiling-2026-10-06/raw/inputs/pme-rc1.35/topol.tpr"
+rc140 = "bench/results/profiling-2026-10-06/raw/inputs/pme-rc1.40/topol.tpr"
+
+[defaults]
+build = "P"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+nsteps = 25000
+resetstep = 5000
+
+[[variant]]
+name = "rc120"
+tpr = "rc120"
+
+[[variant]]
+name = "rc125"
+tpr = "rc125"
+
+[[variant]]
+name = "rc130"
+tpr = "rc130"
+
+[[variant]]
+name = "rc135"
+tpr = "rc135"
+
+[[variant]]
+name = "rc140"
+tpr = "rc140"
+
+[[variant]]
+name = "tunepme"
+tpr = "prod"
+tunepme = true
+nsteps = 45000
+resetstep = 25000

@@ -1,0 +1,41 @@
+# H4: OpenMP thread count of the single PP+PME rank (pinned, auto stride).
+repeats = 5
+[builds]
+P = "~/.cache/gmxbench/builds/3bf7713a0dd56c41"   # cuda-nosub (production-like)
+S = "~/.cache/gmxbench/builds/780edef73168a96d"   # cuda: cycle sub-counters + NVTX
+
+[tprs]
+prod = "bench/results/profiling-2026-10-06/raw/inputs/prod/topol.tpr"
+
+[defaults]
+build = "P"
+nsteps = 25000
+resetstep = 5000
+
+[[variant]]
+name = "t4"
+args = "-ntmpi 1 -ntomp 4 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+
+[[variant]]
+name = "t8"
+args = "-ntmpi 1 -ntomp 8 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+
+[[variant]]
+name = "t12"
+args = "-ntmpi 1 -ntomp 12 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+
+[[variant]]
+name = "t16"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+
+[[variant]]
+name = "t20"
+args = "-ntmpi 1 -ntomp 20 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+
+[[variant]]
+name = "t24"
+args = "-ntmpi 1 -ntomp 24 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+
+[[variant]]
+name = "t32"
+args = "-ntmpi 1 -ntomp 32 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"

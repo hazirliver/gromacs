@@ -1,0 +1,46 @@
+# Throwaway build profiles for the NB-kernel launch-bounds experiment (worktree
+# /home/asokolov/Projects/gromacs-exp-nbminblocks, patch: MIN_BLOCKS_PER_MP via -DGMX_EXP_NB_MIN_BLOCKS_PER_MP).
+# Production-like (no sub-counters/NVTX), like profile cuda-nosub.
+[profiles.cuda-nosub-mb16]
+description = "cuda-nosub, throwaway worktree, NB kernel min blocks/SM 16 (= upstream default; build-path control)"
+cuda_arch = "auto"
+cmake = ["-DCMAKE_BUILD_TYPE=Release", "-DGMX_GPU=CUDA", "-DGMX_BUILD_OWN_FFTW=ON", "-DGMXAPI=OFF",
+         "-DGMX_INSTALL_NBLIB_API=OFF", "-DREGRESSIONTEST_DOWNLOAD=OFF"]
+
+[profiles.cuda-nosub-mb20]
+description = "cuda-nosub, NB kernel min blocks/SM 20 (<= 51 regs/thread, 83% occupancy on sm_89)"
+cuda_arch = "auto"
+cmake = ["-DCMAKE_BUILD_TYPE=Release", "-DGMX_GPU=CUDA", "-DGMX_BUILD_OWN_FFTW=ON", "-DGMXAPI=OFF",
+         "-DGMX_INSTALL_NBLIB_API=OFF", "-DREGRESSIONTEST_DOWNLOAD=OFF", "-DCMAKE_CUDA_FLAGS=-DGMX_EXP_NB_MIN_BLOCKS_PER_MP=20"]
+
+[profiles.cuda-nosub-mb24]
+description = "cuda-nosub, NB kernel min blocks/SM 24 (<= 42 regs/thread, 100% occupancy on sm_89)"
+cuda_arch = "auto"
+cmake = ["-DCMAKE_BUILD_TYPE=Release", "-DGMX_GPU=CUDA", "-DGMX_BUILD_OWN_FFTW=ON", "-DGMXAPI=OFF",
+         "-DGMX_INSTALL_NBLIB_API=OFF", "-DREGRESSIONTEST_DOWNLOAD=OFF", "-DCMAKE_CUDA_FLAGS=-DGMX_EXP_NB_MIN_BLOCKS_PER_MP=24"]
+
+[profiles.cuda-nosub-prioswap]
+description = "cuda-nosub, NB local stream high / PME stream normal priority (upstream: the opposite)"
+cuda_arch = "auto"
+cmake = ["-DCMAKE_BUILD_TYPE=Release", "-DGMX_GPU=CUDA", "-DGMX_BUILD_OWN_FFTW=ON", "-DGMXAPI=OFF",
+         "-DGMX_INSTALL_NBLIB_API=OFF", "-DREGRESSIONTEST_DOWNLOAD=OFF", "-DCMAKE_CXX_FLAGS=-DGMX_EXP_SWAP_STREAM_PRIO"]
+
+[profiles.cuda-nosub-ompcuda]
+description = "cuda-nosub, host code compiled by nvcc also gets -fopenmp (OpenMP pragmas in *_gpu.cpp files take effect)"
+cuda_arch = "auto"
+cmake = ["-DCMAKE_BUILD_TYPE=Release", "-DGMX_GPU=CUDA", "-DGMX_BUILD_OWN_FFTW=ON", "-DGMXAPI=OFF",
+         "-DGMX_INSTALL_NBLIB_API=OFF", "-DREGRESSIONTEST_DOWNLOAD=OFF", "-DCMAKE_CUDA_FLAGS=-Xcompiler=-fopenmp"]
+
+[profiles.cuda-nosub-bondedstream]
+description = "cuda-nosub, GPU bonded kernel in its own stream, joined after the NB kernel launch"
+cuda_arch = "auto"
+cmake = ["-DCMAKE_BUILD_TYPE=Release", "-DGMX_GPU=CUDA", "-DGMX_BUILD_OWN_FFTW=ON", "-DGMXAPI=OFF",
+         "-DGMX_INSTALL_NBLIB_API=OFF", "-DREGRESSIONTEST_DOWNLOAD=OFF",
+         "-DCMAKE_CXX_FLAGS=-DGMX_EXP_BONDED_STREAM", "-DCMAKE_CUDA_FLAGS=-DGMX_EXP_BONDED_STREAM"]
+
+[profiles.cuda-nosub-combo]
+description = "cuda-nosub, OpenMP for nvcc host code + GPU bonded kernel in its own stream"
+cuda_arch = "auto"
+cmake = ["-DCMAKE_BUILD_TYPE=Release", "-DGMX_GPU=CUDA", "-DGMX_BUILD_OWN_FFTW=ON", "-DGMXAPI=OFF",
+         "-DGMX_INSTALL_NBLIB_API=OFF", "-DREGRESSIONTEST_DOWNLOAD=OFF",
+         "-DCMAKE_CXX_FLAGS=-DGMX_EXP_BONDED_STREAM", "-DCMAKE_CUDA_FLAGS=-Xcompiler=-fopenmp -DGMX_EXP_BONDED_STREAM"]

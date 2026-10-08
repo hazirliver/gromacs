@@ -1,0 +1,31 @@
+# THROWAWAY EXPERIMENT, round 3: does the coalesced SETTLE (GMX_EXP_SETTLE_STAGED) add to the stacked
+# configuration (XO build = experiment worktree + day-1 OpenMP fix)?
+repeats = 5
+
+[builds]
+P = "~/.cache/gmxbench/builds/3bf7713a0dd56c41"
+XO = "~/.cache/gmxbench/builds/1093125cdb89aee7"
+
+[tprs]
+prod = "bench/results/profiling-2026-10-06/raw/inputs/prod/topol.tpr"
+
+[defaults]
+tpr = "prod"
+build = "XO"
+args = "-ntmpi 1 -ntomp 20 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+nsteps = 25000
+resetstep = 5000
+
+[[variant]]
+name = "P-t16"
+build = "P"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+[[variant]]
+name = "XO-all-t20"
+env = { GMX_EXP_NB_VARIANT = "13", GMX_EXP_CONCURRENT_SETTLE = "1", GMX_EXP_BONDED_STREAM = "1" }
+[[variant]]
+name = "XO-all+staged-t20"
+env = { GMX_EXP_NB_VARIANT = "13", GMX_EXP_CONCURRENT_SETTLE = "1", GMX_EXP_BONDED_STREAM = "1", GMX_EXP_SETTLE_STAGED = "1" }
+[[variant]]
+name = "XO-nb3+bstream+staged-t20"
+env = { GMX_EXP_NB_VARIANT = "13", GMX_EXP_BONDED_STREAM = "1", GMX_EXP_SETTLE_STAGED = "1" }

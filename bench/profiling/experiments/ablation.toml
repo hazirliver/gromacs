@@ -1,0 +1,49 @@
+# Ablation ladder (TIMING ONLY, NOT PHYSICAL inputs except prod): each difference to prod is the
+# exposed cost of the removed component.
+repeats = 5
+[builds]
+P = "~/.cache/gmxbench/builds/3bf7713a0dd56c41"   # cuda-nosub (production-like)
+S = "~/.cache/gmxbench/builds/780edef73168a96d"   # cuda: cycle sub-counters + NVTX
+
+[tprs]
+prod = "bench/results/profiling-2026-10-06/raw/inputs/prod/topol.tpr"
+nocmap = "bench/results/profiling-2026-10-06/raw/inputs/nocmap/topol.tpr"
+potshift = "bench/results/profiling-2026-10-06/raw/inputs/potshift/topol.tpr"
+rf = "bench/results/profiling-2026-10-06/raw/inputs/rf/topol.tpr"
+nolincs = "bench/results/profiling-2026-10-06/raw/inputs/nolincs/topol.tpr"
+noconstr = "bench/results/profiling-2026-10-06/raw/inputs/noconstr/topol.tpr"
+nocmap-potshift = "bench/results/profiling-2026-10-06/raw/inputs/nocmap-potshift/topol.tpr"
+
+[defaults]
+build = "P"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+nsteps = 25000
+resetstep = 5000
+
+[[variant]]
+name = "prod"
+tpr = "prod"
+
+[[variant]]
+name = "nocmap"
+tpr = "nocmap"
+
+[[variant]]
+name = "potshift"
+tpr = "potshift"
+
+[[variant]]
+name = "rf"
+tpr = "rf"
+
+[[variant]]
+name = "nolincs"
+tpr = "nolincs"
+
+[[variant]]
+name = "noconstr"
+tpr = "noconstr"
+
+[[variant]]
+name = "nocmap-potshift"
+tpr = "nocmap-potshift"

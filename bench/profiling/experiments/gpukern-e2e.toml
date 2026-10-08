@@ -1,0 +1,55 @@
+# THROWAWAY EXPERIMENT (worktree /home/asokolov/Projects/gromacs-exp-gpukern, build profile
+# cuda-nosub-gpukern): kernel rewrites and scheduling changes that keep the physics, end to end on
+# the production command, against the production-like P build and the experiment build with no
+# GMX_EXP_* variable (X-base). Variants select code paths with environment variables.
+# GMX_EXP_NB_VARIANT index: 0 same-as-prod, 1 fsw factored, 2 Ewald Horner, 3 LJ fetch hoisted,
+# 4 = 1+2+3, 5 = 1+3, 6/7/8 knock-outs (timing only), 9 prod @ 12 blocks/SM, 10 = 4 @ 12 blocks/SM,
+# 11 prod @ 10 blocks/SM, 12 = 4 @ 10 blocks/SM, 13 = 1+2.
+repeats = 5
+
+[builds]
+P = "~/.cache/gmxbench/builds/3bf7713a0dd56c41"
+X = "~/.cache/gmxbench/builds/9194ba626fe54212"
+
+[tprs]
+prod = "bench/results/profiling-2026-10-06/raw/inputs/prod/topol.tpr"
+
+[defaults]
+tpr = "prod"
+build = "X"
+args = "-ntmpi 1 -ntomp 16 -nb gpu -pme gpu -bonded gpu -update gpu -nstlist 200"
+nsteps = 25000
+resetstep = 5000
+
+[[variant]]
+name = "P"
+build = "P"
+[[variant]]
+name = "X-base"
+[[variant]]
+name = "nb1-fsw"
+env = { GMX_EXP_NB_VARIANT = "1" }
+[[variant]]
+name = "nb2-ewh"
+env = { GMX_EXP_NB_VARIANT = "2" }
+[[variant]]
+name = "nb3-fsw-ewh"
+env = { GMX_EXP_NB_VARIANT = "13" }
+[[variant]]
+name = "nb7-all"
+env = { GMX_EXP_NB_VARIANT = "4" }
+[[variant]]
+name = "nb0-mb12"
+env = { GMX_EXP_NB_VARIANT = "9" }
+[[variant]]
+name = "nb7-mb12"
+env = { GMX_EXP_NB_VARIANT = "10" }
+[[variant]]
+name = "spread-interleave"
+env = { GMX_EXP_SPREAD_INTERLEAVE = "1" }
+[[variant]]
+name = "pme-ordersq"
+env = { GMX_EXP_PME_ORDERSQ = "1" }
+[[variant]]
+name = "settle-conc"
+env = { GMX_EXP_CONCURRENT_SETTLE = "1" }
